@@ -4055,19 +4055,19 @@ class TDNExt:
 		return skipped
 
 	def _hasTDNTag(self, target):
-		"""Check if a COMP is separately externalized (has its own .tdn sidecar).
+		"""Check if a COMP should be treated as a separate TDN reference.
 
-		Renamed semantics for par-driven discovery: any COMP with
-		par.externaltox set has its own .tox + .tdn sidecar via
-		_writeTdnSidecar, so it should be treated as a reference when
-		encountered as a child during a parent's TDN export.
+		Disabled for now: with the tag-system removed and Phase 2's
+		always-both .tox + .tdn writes, every par-set COMP technically
+		has its own .tdn sidecar -- but treating all of them as
+		references during a parent's TDN export breaks the export's
+		stale-file cleanup (it deletes the children's .tdn files).
+
+		Returning False means children are always embedded inline in the
+		parent's .tdn. A future phase can implement modular references
+		safely once cleanup is rewritten to protect every tracked .tdn.
 		"""
-		if not target.isCOMP:
-			return False
-		try:
-			return bool(target.par.externaltox.eval())
-		except Exception:
-			return False
+		return False
 
 	def _resolveTDNRef(self, target) -> 'Optional[str]':
 		"""Look up an externalized child COMP's relative .tdn file path.
