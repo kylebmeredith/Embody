@@ -1364,6 +1364,49 @@ class TDNExt:
 		self._log(f'Importing from {file_path} into {target_path}...', 'INFO')
 		return self.ImportNetwork(target_path, tdn_data, clear_first=clear_first)
 
+	def RebuildToxFromTdn(self, tdn_path: str, target_comp_path: str,
+						   output_tox_path: Optional[str] = None) -> dict[str, Any]:
+		"""Rebuild a .tox file from a .tdn file.
+
+		Imports the .tdn into target_comp_path (clearing children first), then
+		saves the resulting COMP as a .tox. Useful when only the .tdn sidecar
+		survives (e.g., a fresh git clone with a broken .toe, or a corrupted
+		.tox needing reconstruction).
+
+		Args:
+			tdn_path: Path to the .tdn file on disk
+			target_comp_path: Destination COMP path that will host the rebuilt network
+			output_tox_path: Where to write the .tox. If None, derived from tdn_path
+				with the extension swapped to .tox.
+
+		Returns:
+			dict with 'success' and either 'tox_path' on success or 'error' on failure.
+		"""
+		import os
+		if not tdn_path or not os.path.isfile(tdn_path):
+			return {'success': False, 'error': f'TDN file not found: {tdn_path}'}
+
+		import_result = self.ImportNetworkFromFile(
+			tdn_path, target_path=target_comp_path, clear_first=True)
+		if 'error' in import_result:
+			return {'success': False, 'error': import_result['error']}
+
+		comp = op(target_comp_path)
+		if not comp or comp.family != 'COMP':
+			return {'success': False,
+					'error': f'Target {target_comp_path} is not a COMP after import'}
+
+		if output_tox_path is None:
+			output_tox_path = str(Path(tdn_path).with_suffix('.tox'))
+
+		try:
+			comp.save(output_tox_path)
+		except Exception as e:
+			return {'success': False, 'error': f'Failed to save .tox: {e}'}
+
+		self._log(f'Rebuilt {output_tox_path} from {tdn_path}', 'INFO')
+		return {'success': True, 'tox_path': output_tox_path}
+
 	# =========================================================================
 	# EXPORT INTERNALS
 	# =========================================================================

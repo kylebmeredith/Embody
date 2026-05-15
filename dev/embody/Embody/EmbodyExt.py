@@ -514,22 +514,16 @@ class EmbodyExt:
             self.Log("File extension not found", "ERROR")
             return None, None, None, None
 
-        # Build paths
+        # Build paths -- flat layout: {folder}/{op.name}.{ext}
+        # No mirroring of the network hierarchy. The user's chosen folder
+        # is the file's home; if two ops share a name the user picks unique
+        # names or accepts an overwrite warning at save time.
         filename = opToExternalize.name + file_extension
-        parent_path = str(opToExternalize.parent().path).strip('/')
-        parent_components = [p for p in parent_path.split('/') if p]
-        
-        # Combine folder and parent components
-        path_parts = []
+
         if externalizationsFolder:
-            path_parts.append(externalizationsFolder)
-        path_parts.extend(parent_components)
-        
-        if path_parts:
-            rel_directory = '/'.join(path_parts)
-            rel_file_path = f'{rel_directory}/{filename}'
+            rel_directory = externalizationsFolder
+            rel_file_path = f'{externalizationsFolder}/{filename}'
         else:
-            # Root-level operator with no externalizations folder
             rel_directory = ''
             rel_file_path = filename
         
@@ -1899,28 +1893,29 @@ class EmbodyExt:
         if self.my.par.Detectduplicatepaths:
             self.checkForDuplicates()
 
-        # Get operator lists
-        all_tags = self.getTags()
-        ops_to_externalize = self.getOpsToExternalize(COMP) + self.getOpsToExternalize(DAT)
+        # Get operator lists -- discovery is par-driven now.
+        # An op is "to be externalized" iff its native parameter says so:
+        # par.externaltox for COMPs, par.file for DATs.
+        ops_to_externalize = self.getOpsByPar(COMP) + self.getOpsByPar(DAT)
         externalized_ops = self.getExternalizedOps(COMP) + self.getExternalizedOps(DAT)
-        externalized_paths = [ext.path for ext in externalized_ops]
+        externalized_paths = {ext.path for ext in externalized_ops}
+        ops_to_externalize_paths = {o.path for o in ops_to_externalize}
 
-        # Find additions and subtractions
+        # Additions: par-declared but not yet tracked.
+        # getOpsByPar already enforces isOpProcessable.
         additions = [
             oper for oper in ops_to_externalize
             if oper.path not in externalized_paths
-            and set(all_tags).intersection(oper.tags)
-            and self.isOpProcessable(oper)
         ]
 
-        # TDN-strategy COMPs are excluded -- their lifecycle is managed by
-        # ToggleTag() → _removeTDNStrategy(), not by tag-presence detection.
-        # Without this, Full Project TDN exports (which track "/" in the table
-        # without tagging the root) get incorrectly removed as "subtractions".
+        # Subtractions: tracked but par was cleared. TDN-strategy COMPs are
+        # excluded -- their lifecycle is managed by _removeTDNStrategy(), not
+        # by par-presence detection. Full Project TDN exports track "/" in
+        # the table without setting par.externaltox on the root.
         subtractions = [
             oper for oper in externalized_ops
             if oper.path not in tdn_paths
-            and not set(all_tags).intersection(oper.tags)
+            and oper.path not in ops_to_externalize_paths
             and not oper.warnings()
             and not oper.scriptErrors()
             and self.isOpProcessable(oper)
@@ -2069,37 +2064,44 @@ class EmbodyExt:
             )
 
     def getOpsByPar(self, opFamily: type) -> list[OP]:
-        """Get operators that have external paths set."""
+        """Get operators that are externalized, by inspection of native TD parameters.
+
+        A COMP is externalized iff par.externaltox != ''.
+        A DAT is externalized iff par.file != '' and its type is in supported_dat_types.
+
+        Excludes clones, replicants, /local, and engine/time/annotate types via
+        isOpProcessable.
+        """
         if opFamily == COMP:
             return self.root.findChildren(
                 type=COMP,
                 key=lambda x: (
                     x.par.externaltox.eval() != '' and
-                    x.type not in ['engine', 'time', 'annotate']
+                    self.isOpProcessable(x)
                 )
             )
         else:
             return self.root.findChildren(
                 type=DAT,
                 parName='file',
-                key=lambda x: x.par.file.eval() != '',
-                path='^/local/shortcuts'
+                key=lambda x: (
+                    x.par.file.eval() != '' and
+                    x.type in self.supported_dat_types and
+                    self.isOpProcessable(x)
+                )
             )
 
     def isOpEligibleToBeExternalized(self, oper: OP) -> bool:
-        """Check if an operator can be externalized."""
+        """Check if an operator can be externalized.
+
+        Tag membership is no longer required -- discovery is par-driven
+        (par.externaltox for COMPs, par.file for DATs). This predicate
+        now only enforces that the operator type itself is supportable.
+        """
         if oper.family == 'COMP':
             return True
-        
         if oper.type not in self.supported_dat_types:
             return False
-            
-        dat_tags = self.getTags('DAT')
-        has_tag = any(tag in oper.tags for tag in dat_tags)
-        
-        if not has_tag:
-            return False
-            
         return True
 
     def isOpProcessable(self, oper: OP) -> bool:
@@ -2191,6 +2193,9 @@ class EmbodyExt:
                 self.Externalizations[opPath, 'touch_build'] = app.build
 
             oper.saveExternalTox()
+
+            # Write .tdn sidecar alongside the .tox so diffs reflect the latest state.
+            self._writeTdnSidecar(oper)
 
             # Update timestamp
             if hasattr(oper.par, 'externalTimeStamp') and oper.externalTimeStamp != 0:
@@ -2727,6 +2732,8 @@ class EmbodyExt:
         if oper.family == 'COMP':
             strategy = 'tox'
             self._setupCompForExternalization(oper, rel_file_path, save_file_path)
+            # Always-both: write the .tdn sidecar alongside the freshly-saved .tox.
+            self._writeTdnSidecar(oper)
             dirty = oper.dirty
             build_num = int(oper.par.Build.eval()) if hasattr(oper.par, 'Build') else 1
             touch_build = str(oper.par.Touchbuild.eval()) if hasattr(oper.par, 'Touchbuild') else app.build
@@ -2798,20 +2805,30 @@ class EmbodyExt:
                 self.applyTagToOperator(child, tdn_tag)
 
     def _buildTDNRelPath(self, oper: OP) -> Path:
-        """Generate a relative .tdn file path for a COMP."""
+        """Generate a flat relative .tdn file path for a COMP.
+
+        Mirrors getOpPaths() flat layout: {folder}/{op.name}.tdn.
+        """
         ext_folder = self.ExternalizationsFolder
-        parent_path = str(oper.parent().path).strip('/')
-        parts = [p for p in parent_path.split('/') if p]
-
-        path_parts = []
-        if ext_folder:
-            path_parts.append(ext_folder)
-        path_parts.extend(parts)
-
         filename = oper.name + '.tdn'
-        if path_parts:
-            return Path('/'.join(path_parts)) / filename
+        if ext_folder:
+            return Path(ext_folder) / filename
         return Path(filename)
+
+    def _writeTdnSidecar(self, comp: COMP) -> None:
+        """Write the .tdn sidecar file for a COMP saved as .tox.
+
+        Always-both-formats: every TOX externalization gets a .tdn sidecar
+        alongside it for diff-friendly version control. Failures are
+        non-fatal -- the .tox is the canonical artifact, the .tdn is bonus.
+        """
+        try:
+            tdn_path = self.buildAbsolutePath(self._buildTDNRelPath(comp))
+            tdn_path.parent.mkdir(parents=True, exist_ok=True)
+            self.my.ext.TDN.ExportNetwork(
+                root_path=comp.path, output_file=str(tdn_path))
+        except Exception as e:
+            self.Log(f"TDN sidecar export failed for {comp.path}", "WARNING", str(e))
 
     def _setupCompForExternalization(self, oper, rel_file_path, save_file_path):
         """Configure a COMP for TOX externalization."""
@@ -2834,13 +2851,23 @@ class EmbodyExt:
                     break
         
         self.setupBuildParameters(oper, build_page, current_build, app.build)
-        
-        # Set external path
-        if not oper.par.externaltox.eval():
+
+        # Set external path. When the save path falls inside the user palette
+        # folder, prefer an expression form so the .tox stays portable across
+        # machines whose palette folders live in different absolute locations.
+        oper.par.externaltox.readOnly = False
+        palette_root = os.path.normpath(app.userPaletteFolder) if app.userPaletteFolder else ''
+        abs_path = os.path.normpath(str(save_file_path))
+        in_palette = bool(palette_root) and abs_path.startswith(palette_root + os.sep)
+
+        if in_palette:
+            rel_to_palette = os.path.relpath(abs_path, palette_root).replace('\\', '/')
+            oper.par.externaltox.expr = f"app.userPaletteFolder + '/{rel_to_palette}'"
+        elif not oper.par.externaltox.eval():
             oper.par.externaltox = rel_file_path
         else:
             oper.par.externaltox = self.normalizePath(oper.par.externaltox.eval())
-        
+
         oper.par.externaltox.readOnly = True
         oper.par.enableexternaltox = True
         
