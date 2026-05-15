@@ -465,18 +465,18 @@ def onSelect(comp, startRow, startCol, startCoords,
 			parent.Embody.OpenSaveFile(rel_fp)
 
 	elif col == COL_STRATEGY:
-		global _active_strategy_row
 		st = data[row, 'strategy_state'].val
 		oper = op(path)
 
 		if st == 'TDN_Exporting':
 			return
-
-		# Strategy menu (tagger UI) was removed in Phase 5b. The Phase 2.5
-		# contextual action menu will replace this affordance. For now,
-		# clicking the strategy cell is a no-op -- users set par.externaltox
-		# directly or use Externalize Full Project.
-		return
+		if oper is None:
+			# Synthetic parent row -- no op to act on
+			return
+		# Hand off to the Phase 2.5 contextual action menu, scoped to this
+		# row's op. The menu offers Save, Reload-from-.tdn (COMPs only),
+		# Reveal, Remove, etc. depending on op state.
+		parent.Embody.ext.Embody.OpenActionMenu(oper.path)
 
 	elif col == COL_DELETE:
 		rel_fp = data[row, 'rel_file_path'].val

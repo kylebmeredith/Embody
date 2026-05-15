@@ -63,14 +63,46 @@ def onCook(scriptOp):
 		else:
 			filter_text = filter_op.par.text.eval().strip().lower()
 
-	# Apply text filter (case-insensitive substring match against path and file path)
-	if filter_text:
+	# Read filter toggles from the Embody COMP (Phase 4 params).
+	# Both default to "show everything" so older .toes without these
+	# params still work via getattr fallback.
+	filter_dirty = bool(getattr(parent.Embody.par, 'Filterdirty', None)
+						and parent.Embody.par.Filterdirty.eval())
+	filter_dats = bool(getattr(parent.Embody.par, 'Filterdats', None)
+						and parent.Embody.par.Filterdats.eval())
+
+	def _row_is_dirty(row):
+		val = str(row.get('dirty', '')).strip()
+		return val not in ('', 'False', 'false', '0', 'Clean', 'Saved')
+
+	def _row_is_dat(path, row):
+		"""True if the row is a DAT externalization (not a synthetic parent
+		and not a COMP)."""
+		oper = op(path)
+		if oper is None:
+			# Synthetic parent -- not itself a DAT
+			return False
+		return oper.family == 'DAT'
+
+	# Apply text + state filters (case-insensitive substring match against
+	# path and file path; isDirty + hide-DATs gating).
+	if filter_text or filter_dirty or filter_dats:
 		matched_paths = set()
 		for path in all_paths:
 			row = data_rows[path]
-			searchable = (path + ' ' + row.get('rel_file_path', '')).lower()
-			if filter_text in searchable:
-				matched_paths.add(path)
+			# Only filter against ops that have a row of their own --
+			# synthetic parents come along for the ride below.
+			if op(path) is None:
+				continue
+			if filter_text:
+				searchable = (path + ' ' + row.get('rel_file_path', '')).lower()
+				if filter_text not in searchable:
+					continue
+			if filter_dirty and not _row_is_dirty(row):
+				continue
+			if filter_dats and _row_is_dat(path, row):
+				continue
+			matched_paths.add(path)
 
 		# Include ancestor paths to maintain tree structure
 		paths_to_keep = set()

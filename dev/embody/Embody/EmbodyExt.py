@@ -59,6 +59,8 @@ class EmbodyExt:
         'Detectduplicatepaths', 'Localtimestamps',
         # Action menu / save UX (Phase 2.5)
         'Defaulttoxfolder', 'Defaultscriptfolder', 'Synconsave',
+        # Manager filters (Phase 4)
+        'Filterdirty', 'Filterdats',
         # TDN
         'Tdnmode',
         'Embeddatsintdns', 'Embedstorageintdns', 'Tdndatsafety',
