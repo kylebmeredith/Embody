@@ -16,7 +16,13 @@ The fork replaces Embody's tag-based discovery and persistent tracking with the 
   - `Filterdirty` (default off) -- hides clean/saved externalizations so only dirty ones (par-changed, unsaved, exporting) appear.
   - `Filterdats` (default off) -- hides DAT (text/table) externalizations from the list. DATs still externalize and auto-sync; this is purely a view filter for users who manage the list for `.tox` files and treat DATs as fire-and-forget.
   `inject_parents_callbacks.py` applies both filters at the same stage as the text filter, preserving ancestor rows so tree mode stays well-formed. Strategy-cell click is now wired: instead of being a no-op (Phase 5b regression), it opens the contextual action menu (Phase 2.5) scoped to that row's operator -- so a click on `TOX_Dirty` reaches `Save` in one keystroke (Enter on the dialog).
-- **Phase 4 still pending.** Tree/flat list toggle, Save-all-force, Rebuild-all-from-TDN, per-row save/reload icons next to the strategy cell.
+- **Phase 4 — per-row Save / Reload columns (in progress).** Two new clickable cells in the Manager list, between the Strategy badge and the Timestamp. The empty Build column was dropped (Build/Date metadata went away in Phase 3 anyway).
+  - **Save** (`↓`): direct-save click for the row. For dirty COMPs the glyph is bright; for clean ones it's dimmed so it still reads as actionable (re-save) but doesn't shout. Saves COMPs via `Save(path)` -- writes both `.tox` and `.tdn` -- and DATs via the same internal helper the action menu uses.
+  - **Reload** (`↻`): COMPs only. Opens the Phase 2.5 reload sub-menu (`.tdn` vs `.tox`). Hidden on synthetic parent rows and on DATs.
+  - The Strategy cell still opens the full action menu (unchanged) -- click Save for the fast path, click Strategy for the everything-else path.
+  Columns went from 8 to 9; list1 COMP's `cols` par bumped via MCP.
+- **OpenSaveFile false positive fix.** `explorer.exe /select,<path>` returns exit code 1 even on success (Microsoft's design -- the launcher detaches). Embody was logging a `Failed to open file location` warning every successful click on Windows. Switched to `subprocess.Popen` and dropped the post-launch return-code check. macOS branch unchanged.
+- **Phase 4 still pending.** Tree/flat list toggle (`Listmode`), `Saveallforce` pulse, `Rebuildallfromtdn` pulse.
 - **Phase 6 pending (roadmap).** Per-COMP and project-wide Release / unexternalize. Ports `C:/Users/Kyle/dev/touch/Externalize/Release.py` into Embody: prompts for name + version, resets custom pars on a copy, recursively clears `par.externaltox` / `par.file` / `par.syncfile`, sets the COMP's current parameter page to its first custom page before save, and writes `{Name}_{Version}.tox`. Project-wide flavor uses Embody's existing strip/restore pattern to save a self-contained `.toe` to a chosen path without disturbing the live session.
 
 ## v5.0.407

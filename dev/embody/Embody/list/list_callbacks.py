@@ -16,18 +16,27 @@ COL_PATH = 1
 COL_TYPE = 2
 COL_FILE = 3
 COL_STRATEGY = 4
-COL_BUILD = 5
-COL_TIMESTAMP = 6
-COL_DELETE = 7
+COL_SAVE = 5
+COL_RELOAD = 6
+COL_TIMESTAMP = 7
+COL_DELETE = 8
 
-NUM_COLS = 8
+NUM_COLS = 9
 
 HEADER_LABELS = [
 	'', 'Network Path', '', 'External File Path',
-	'Strategy', 'Build', 'Timestamp', 'Del',
+	'Strategy', 'Save', 'Reload', 'Timestamp', 'Del',
 ]
-COL_WIDTHS    = [16, 0, 80, 200, 70, 50, 190, 36]
-COL_STRETCHES = [False, True, False, True, False, False, False, False]
+COL_WIDTHS    = [16, 0, 80, 200, 70, 40, 40, 190, 36]
+COL_STRETCHES = [False, True, False, True, False, False, False, False, False]
+
+# Glyphs for the save / reload icon cells (single-char to keep columns narrow)
+SAVE_GLYPH = '↓'    # ↓
+RELOAD_GLYPH = '↻'  # ↻
+
+# Strategy states that mark a COMP / DAT as dirty (save is meaningful)
+DIRTY_STATES = {'TOX_Dirty', 'TOX_ParChange', 'TDN_Dirty', 'TDN_ParChange'}
+SAVED_STATES = {'TOX_Saved', 'TDN_Saved', 'DAT_Saved'}
 TEXT_PAD_X = 6  # horizontal padding for left-justified cells
 
 # Row whose Strategy cell is "active" (menu open) -- shows "..." while menu visible
@@ -246,10 +255,36 @@ def _apply_cell(attribs, row, col, data, highlight=False):
 			attribs.bgColor = bg
 		attribs.textJustify = JustifyType.CENTER
 
-	elif col == COL_BUILD:
-		attribs.text = data[row, 'build'].val
+	elif col == COL_SAVE:
+		st = data[row, 'strategy_state'].val
+		if st in DIRTY_STATES:
+			# Dirty: bright accent on the glyph
+			attribs.text = SAVE_GLYPH
+			attribs.textColor = _t['text']
+			attribs.bgColor = bg
+		elif st in SAVED_STATES:
+			# Clean externalization: still allow a manual re-save, but dim
+			attribs.text = SAVE_GLYPH
+			attribs.textColor = _t['text_dim']
+			attribs.bgColor = bg
+		else:
+			attribs.text = ''
+			attribs.bgColor = bg
 		attribs.textJustify = JustifyType.CENTER
-		attribs.bgColor = bg
+		attribs.fontSizeX = 12
+
+	elif col == COL_RELOAD:
+		st = data[row, 'strategy_state'].val
+		# Reload only makes sense for COMPs that have a .tox / .tdn on disk.
+		if st in (DIRTY_STATES | {'TOX_Saved', 'TDN_Saved'}):
+			attribs.text = RELOAD_GLYPH
+			attribs.textColor = _t['text_dim']
+			attribs.bgColor = bg
+		else:
+			attribs.text = ''
+			attribs.bgColor = bg
+		attribs.textJustify = JustifyType.CENTER
+		attribs.fontSizeX = 12
 
 	elif col == COL_TIMESTAMP:
 		ts = data[row, 'timestamp'].val
@@ -391,6 +426,19 @@ def onRollover(comp, row, col, coords, prevRow, prevCol, prevCoords):
 			comp.cellAttribs[row, col].textColor = _t['text']
 			comp.cellAttribs[row, col].bgColor = _t['select']
 
+	elif col == COL_SAVE:
+		st = data[row, 'strategy_state'].val
+		if st in (DIRTY_STATES | SAVED_STATES):
+			# Brighten so the user sees the cell is actionable
+			comp.cellAttribs[row, col].textColor = _t['text']
+			comp.cellAttribs[row, col].bgColor = _t['select']
+
+	elif col == COL_RELOAD:
+		st = data[row, 'strategy_state'].val
+		if st in (DIRTY_STATES | {'TOX_Saved', 'TDN_Saved'}):
+			comp.cellAttribs[row, col].textColor = _t['text']
+			comp.cellAttribs[row, col].bgColor = _t['select']
+
 
 def onSelect(comp, startRow, startCol, startCoords,
              endRow, endCol, endCoords, start, end):
@@ -477,6 +525,28 @@ def onSelect(comp, startRow, startCol, startCoords,
 		# row's op. The menu offers Save, Reload-from-.tdn (COMPs only),
 		# Reveal, Remove, etc. depending on op state.
 		parent.Embody.ext.Embody.OpenActionMenu(oper.path)
+
+	elif col == COL_SAVE:
+		st = data[row, 'strategy_state'].val
+		oper = op(path)
+		if oper is None or st not in (DIRTY_STATES | SAVED_STATES):
+			return
+		# Direct save -- the dialog cascade is overkill for the common case.
+		ext = parent.Embody.ext.Embody
+		if oper.family == 'COMP':
+			ext.Save(oper.path)
+		elif oper.family == 'DAT':
+			ext._saveOpFromMenu(oper)
+
+	elif col == COL_RELOAD:
+		st = data[row, 'strategy_state'].val
+		oper = op(path)
+		if oper is None or oper.family != 'COMP':
+			return
+		if st not in (DIRTY_STATES | {'TOX_Saved', 'TDN_Saved'}):
+			return
+		# Reload offers .tdn vs .tox; hand off to the Phase 2.5 sub-menu.
+		parent.Embody.ext.Embody._actionMenuReload(oper)
 
 	elif col == COL_DELETE:
 		rel_fp = data[row, 'rel_file_path'].val
