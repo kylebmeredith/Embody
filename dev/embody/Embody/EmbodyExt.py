@@ -57,6 +57,8 @@ class EmbodyExt:
         # Behavior
         'Logfolder', 'Logtofile', 'Verbose', 'Print',
         'Detectduplicatepaths', 'Localtimestamps',
+        # Action menu / save UX (Phase 2.5)
+        'Defaulttoxfolder', 'Defaultscriptfolder', 'Synconsave',
         # TDN
         'Tdnmode',
         'Embeddatsintdns', 'Embedstorageintdns', 'Tdndatsafety',
@@ -4615,6 +4617,275 @@ class EmbodyExt:
             self.Refresh()
         elif action == 'close':
             win.par.winclose.pulse()
+
+    # ==========================================================================
+    # CONTEXTUAL ACTION MENU (Phase 2.5)
+    # ==========================================================================
+
+    def OpenActionMenu(self, op_path: Optional[str] = None) -> None:
+        """Open the contextual Embody action menu for an operator.
+
+        If op_path is None, picks the target from the user's current pane:
+        the rollover op first, then the first selected op, then the pane
+        owner as a fallback. The menu's options vary by op family and by
+        whether the op is already externalized.
+        """
+        if self._performMode:
+            return
+        target = op(op_path) if op_path else self._resolveActionTarget()
+        if target is None:
+            self.Log('Action menu: no operator under cursor', 'WARNING')
+            return
+        if target.family not in ('COMP', 'DAT'):
+            self.Log(f'Action menu: {target.family} not supported', 'WARNING')
+            return
+
+        is_externalized = self._isOpExternalized(target)
+        if is_externalized:
+            self._actionMenuExternalized(target)
+        else:
+            self._actionMenuNotExternalized(target)
+
+    def _resolveActionTarget(self) -> Optional[OP]:
+        """Pick the operator to act on from the active pane context."""
+        try:
+            pane = ui.panes.current
+        except Exception:
+            pane = None
+        if pane is None or not getattr(pane, 'owner', None):
+            return None
+        target = None
+        # Rollover (cursor-over op) takes priority
+        try:
+            target = pane.rolloverOp
+        except Exception:
+            pass
+        # Otherwise the first selected op in the pane's owner
+        if target is None:
+            try:
+                sel = list(pane.owner.selectedChildren)
+                if sel:
+                    target = sel[0]
+            except Exception:
+                pass
+        # Otherwise the pane's owner itself
+        if target is None:
+            target = pane.owner
+        return target
+
+    def _isOpExternalized(self, target: OP) -> bool:
+        """True iff the operator's native external-file par is set."""
+        try:
+            if target.family == 'COMP':
+                return bool(target.par.externaltox.eval())
+            elif target.family == 'DAT':
+                return bool(target.par.file.eval())
+        except Exception:
+            pass
+        return False
+
+    def _actionMenuExternalized(self, target: OP) -> None:
+        """Menu for an op that is already externalized."""
+        is_comp = (target.family == 'COMP')
+        rel = (target.par.externaltox.eval() if is_comp
+               else target.par.file.eval())
+        title = f'Embody: {target.name}'
+        msg = f'{target.path}\nexternalized to: {rel}'
+        buttons = ['Cancel', 'Save']
+        if is_comp:
+            buttons.append('Reload from .tdn')
+        buttons.append('More...')
+        choice = ui.messageBox(title, msg, buttons=buttons)
+        if choice <= 0:
+            return
+        if choice == 1:
+            self._saveOpFromMenu(target)
+            return
+        if is_comp and choice == 2:
+            self.ReloadFromTdn(target.path)
+            return
+        # "More..." -- last button
+        self._actionMenuMore(target)
+
+    def _actionMenuMore(self, target: OP) -> None:
+        """Secondary menu with less-frequent / destructive actions."""
+        buttons = ['Cancel', 'Reveal in file browser',
+                   'Re-externalize', 'Remove externalization']
+        choice = ui.messageBox(
+            f'Embody: {target.name} - more',
+            f'Choose an action for {target.path}.',
+            buttons=buttons)
+        if choice <= 0:
+            return
+        if choice == 1:
+            is_comp = (target.family == 'COMP')
+            rel = (target.par.externaltox.eval() if is_comp
+                   else target.par.file.eval())
+            if rel:
+                self.OpenSaveFile(rel)
+            return
+        if choice == 2:
+            self._reexternalizeViaMenu(target)
+            return
+        if choice == 3:
+            is_comp = (target.family == 'COMP')
+            rel = (target.par.externaltox.eval() if is_comp
+                   else target.par.file.eval())
+            self.RemoveListerRow(target.path, rel, delete_file=True)
+
+    def _actionMenuNotExternalized(self, target: OP) -> None:
+        """Menu for an op that is not yet externalized."""
+        is_comp = (target.family == 'COMP')
+        if not is_comp and target.type not in self.supported_dat_types:
+            self.Log(
+                f'Cannot externalize DAT type {target.type!r}', 'WARNING')
+            return
+        default_par = ('Defaulttoxfolder' if is_comp
+                       else 'Defaultscriptfolder')
+        has_default = bool(
+            getattr(self.my.par, default_par, None)
+            and getattr(self.my.par, default_par).eval())
+        buttons = ['Cancel']
+        if has_default:
+            buttons.append('Externalize (default folder)')
+        buttons.append('Externalize (choose folder)...')
+        choice = ui.messageBox(
+            f'Embody: {target.name}',
+            f'Externalize {target.path}?',
+            buttons=buttons)
+        if choice <= 0:
+            return
+        if has_default and choice == 1:
+            self._externalizeViaMenu(target, use_default=True)
+        else:
+            self._externalizeViaMenu(target, use_default=False)
+
+    def _externalizeViaMenu(self, target: OP, use_default: bool) -> None:
+        """Set the external file par and run Update."""
+        is_comp = (target.family == 'COMP')
+        folder = self._getSaveLocation(target, use_default, is_tox=is_comp)
+        if folder is None:
+            return
+        if is_comp:
+            rel = f'{folder}/{target.name}.tox' if folder else f'{target.name}.tox'
+            try:
+                target.par.externaltox.readOnly = False
+            except Exception:
+                pass
+            target.par.externaltox = rel
+        else:
+            ext = self.dat_type_to_extension.get(target.type, 'py')
+            rel = (f'{folder}/{target.name}.{ext}' if folder
+                   else f'{target.name}.{ext}')
+            try:
+                target.par.file.readOnly = False
+            except Exception:
+                pass
+            target.par.file = rel
+        self.UpdateHandler()
+
+    def _reexternalizeViaMenu(self, target: OP) -> None:
+        """Clear and re-set the external path so the user can pick a new folder."""
+        is_comp = (target.family == 'COMP')
+        try:
+            if is_comp:
+                target.par.externaltox.readOnly = False
+                target.par.externaltox = ''
+            else:
+                target.par.file.readOnly = False
+                target.par.file = ''
+                target.par.syncfile = False
+        except Exception as e:
+            self.Log(f'Re-externalize: failed to clear par: {e}', 'WARNING')
+            return
+        # Re-route through the not-yet-externalized branch so the user picks
+        # default vs custom folder.
+        self._actionMenuNotExternalized(target)
+
+    def _getSaveLocation(self, target: OP, use_default: bool, is_tox: bool
+                          ) -> Optional[str]:
+        """Resolve the externalization folder for an operator.
+
+        If use_default is True and the matching Defaulttoxfolder /
+        Defaultscriptfolder param is set and exists on disk, returns its
+        normalized value. Otherwise prompts the user via ui.chooseFolder.
+        Returns the folder as a string (possibly empty for project root),
+        or None if the user cancels.
+        """
+        if use_default:
+            par_name = 'Defaulttoxfolder' if is_tox else 'Defaultscriptfolder'
+            par = getattr(self.my.par, par_name, None)
+            default_val = str(par.eval()) if par else ''
+            if default_val:
+                # Resolve relative paths against project.folder for the existence check
+                check_path = (Path(default_val) if Path(default_val).is_absolute()
+                              else Path(project.folder) / default_val)
+                if check_path.is_dir():
+                    return self.normalizePath(default_val)
+                self.Log(
+                    f'Default folder missing on disk: {default_val} -- prompting',
+                    'WARNING')
+        start = self.ExternalizationsFolder or project.folder
+        chosen = ui.chooseFolder(
+            title=f'Externalize {target.name} - choose folder',
+            start=start)
+        if not chosen:
+            return None
+        # Convert absolute → relative-to-project where possible
+        try:
+            rel = str(Path(chosen).resolve().relative_to(
+                Path(project.folder).resolve()))
+            return self.normalizePath(rel if rel != '.' else '')
+        except Exception:
+            return self.normalizePath(chosen)
+
+    def _saveOpFromMenu(self, target: OP) -> None:
+        """Save an already-externalized operator."""
+        try:
+            if target.family == 'COMP':
+                self.Save(target.path)
+            elif target.family == 'DAT':
+                abs_path = self.buildAbsolutePath(target.par.file.eval())
+                target.save(str(abs_path))
+                self.Log(f'Saved {target.path}', 'SUCCESS')
+        except Exception as e:
+            self.Log(f'Save failed for {target.path}: {e}', 'ERROR')
+
+    def ReloadFromTdn(self, comp_path: str) -> None:
+        """Rebuild a COMP from its .tdn sidecar on disk.
+
+        Wraps TDNExt.ImportNetworkFromFile with clear_first=True so the
+        on-disk .tdn becomes the source of truth. The natural use case
+        is `agent edits .tdn -> user clicks Reload from .tdn -> live
+        network reflects the edit`.
+        """
+        if self._performMode:
+            return
+        target = op(comp_path)
+        if not target or target.family != 'COMP':
+            self.Log(
+                f'ReloadFromTdn requires a COMP: {comp_path}', 'ERROR')
+            return
+        rel_tdn = self._buildTDNRelPath(target)
+        abs_tdn = self.buildAbsolutePath(rel_tdn)
+        if not abs_tdn.is_file():
+            self.Log(
+                f'No .tdn sidecar found for {comp_path} at {rel_tdn}',
+                'WARNING')
+            return
+        try:
+            result = self.my.ext.TDN.ImportNetworkFromFile(
+                str(abs_tdn), target_path=comp_path, clear_first=True)
+            if isinstance(result, dict) and result.get('error'):
+                self.Log(
+                    f'Reload from .tdn failed for {comp_path}: '
+                    f'{result["error"]}', 'ERROR')
+            else:
+                self.Log(
+                    f'Reloaded {comp_path} from {rel_tdn}', 'SUCCESS')
+        except Exception as e:
+            self.Log(
+                f'Reload from .tdn failed for {comp_path}: {e}', 'ERROR')
 
     def getProjectFolder(self) -> str:
         """Get project folder path."""

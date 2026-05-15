@@ -111,7 +111,11 @@ def onProjectPreSave():
 	# Suppress the delayed Refresh pulse - the continuity check must NOT
 	# fire during the strip/restore window or it will delete files for
 	# temporarily-missing operators inside TDN COMPs.
-	parent.Embody.ext.Embody.Update(suppress_refresh=True)
+	# Gated by the Synconsave toggle (Phase 2.5): user can opt out of
+	# running a full Update on every Ctrl+S.
+	if getattr(parent.Embody.par, 'Synconsave', None) is None \
+			or parent.Embody.par.Synconsave.eval():
+		parent.Embody.ext.Embody.Update(suppress_refresh=True)
 
 	# Master TDN mode: when Off, skip the entire TDN pre-save pipeline
 	# (export, strip, restore). .tdn files on disk stay untouched.

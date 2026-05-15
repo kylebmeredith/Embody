@@ -30,6 +30,10 @@ def onKey(dat, key, character, alt, lAlt, rAlt, ctrl, lCtrl, rCtrl, shift, lShif
 	if state and key == 'o' and ctrl_or_cmd and lShift:
 		parent.Embody.Manager('open')
 
+	# contextual action menu (default Ctrl+W)
+	elif state and key == 'w' and ctrl_or_cmd and not lShift and not alt:
+		parent.Embody.ext.Embody.OpenActionMenu()
+
 	# initialize/update externalizations
 	elif state and key == 'u' and ctrl_or_cmd and lShift:
 		parent.Embody.UpdateHandler()
