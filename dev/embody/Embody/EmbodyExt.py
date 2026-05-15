@@ -4742,17 +4742,18 @@ class EmbodyExt:
                else target.par.file.eval())
         buttons = ['Save']
         if is_comp:
-            buttons.append('Reload from .tdn')
-        buttons.append('More...')
+            # PopDialog buttons clip past ~10 chars; keep labels short
+            buttons.append('Reload')
+        buttons.append('More')
         buttons.append('Cancel')
 
         def on_choice(info, t=target):
             btn = info.get('button')
             if btn == 'Save':
                 self._saveOpFromMenu(t)
-            elif btn == 'Reload from .tdn':
-                self.ReloadFromTdn(t.path)
-            elif btn == 'More...':
+            elif btn == 'Reload':
+                self._actionMenuReload(t)
+            elif btn == 'More':
                 self._actionMenuMore(t)
             # Cancel / unknown -> no-op
 
@@ -4765,12 +4766,50 @@ class EmbodyExt:
             enter_button=1,           # Save
         )
 
+    def _actionMenuReload(self, target: OP) -> None:
+        """Sub-menu: choose how to reload an externalized COMP from disk."""
+        if target.family != 'COMP':
+            self.Log('Reload only applies to COMPs', 'WARNING')
+            return
+        buttons = ['From .tdn', 'From .tox', 'Cancel']
+
+        def on_choice(info, t=target):
+            btn = info.get('button')
+            if btn == 'From .tdn':
+                self.ReloadFromTdn(t.path)
+            elif btn == 'From .tox':
+                self._reloadFromTox(t)
+
+        self._popDialog(
+            text=f'Reload {target.path} from disk:\n'
+                 f'  .tdn = JSON sidecar (agent-edited, diff-friendly)\n'
+                 f'  .tox = binary (TD native, faster)',
+            title=f'Embody: reload {target.name}',
+            buttons=buttons,
+            callback=on_choice,
+            esc_button=len(buttons),
+            enter_button=1,
+        )
+
+    def _reloadFromTox(self, target: OP) -> None:
+        """Reload a COMP from its .tox file via TD's native reloadtoxpulse."""
+        try:
+            if not target.par.externaltox.eval():
+                self.Log(
+                    f'No .tox path set for {target.path}', 'WARNING')
+                return
+            target.par.reloadtoxpulse.pulse()
+            self.Log(f'Reloaded {target.path} from .tox', 'SUCCESS')
+        except Exception as e:
+            self.Log(
+                f'Reload from .tox failed for {target.path}: {e}', 'ERROR')
+
     def _actionMenuMore(self, target: OP) -> None:
         """Async secondary menu with less-frequent / destructive actions."""
         buttons = [
-            'Reveal in file browser',
-            'Re-externalize',
-            'Remove externalization',
+            'Reveal',
+            'Re-extern',
+            'Remove',
             'Cancel',
         ]
 
@@ -4779,12 +4818,12 @@ class EmbodyExt:
             is_comp = (t.family == 'COMP')
             rel = (t.par.externaltox.eval() if is_comp
                    else t.par.file.eval())
-            if btn == 'Reveal in file browser':
+            if btn == 'Reveal':
                 if rel:
                     self.OpenSaveFile(rel)
-            elif btn == 'Re-externalize':
+            elif btn == 'Re-extern':
                 self._reexternalizeViaMenu(t)
-            elif btn == 'Remove externalization':
+            elif btn == 'Remove':
                 self.RemoveListerRow(t.path, rel, delete_file=True)
 
         self._popDialog(
@@ -4810,15 +4849,15 @@ class EmbodyExt:
             and getattr(self.my.par, default_par).eval())
         buttons = []
         if has_default:
-            buttons.append('Externalize (default folder)')
-        buttons.append('Externalize (choose folder)...')
+            buttons.append('To default')
+        buttons.append('Choose...')
         buttons.append('Cancel')
 
         def on_choice(info, t=target):
             btn = info.get('button')
-            if btn == 'Externalize (default folder)':
+            if btn == 'To default':
                 self._externalizeViaMenu(t, use_default=True)
-            elif btn == 'Externalize (choose folder)...':
+            elif btn == 'Choose...':
                 self._externalizeViaMenu(t, use_default=False)
 
         self._popDialog(
@@ -4993,10 +5032,12 @@ class EmbodyExt:
                 if result != 0:
                     self.Log(f'Failed to open file location: {filepath}', 'WARNING')
             elif sys.platform.startswith('win'):
+                # explorer.exe /select,<path> returns exit code 1 even on
+                # success (by design -- the launcher detaches). Don't gate
+                # on the return code or every successful click logs a
+                # false-positive warning.
                 filepath = filepath.replace('/', '\\')
-                result = subprocess.call(['explorer', '/select,', filepath])
-                if result != 0:
-                    self.Log(f'Failed to open file location: {filepath}', 'WARNING')
+                subprocess.Popen(['explorer', f'/select,{filepath}'])
         except Exception as e:
             self.Log(f'Failed to open file location: {e}', 'ERROR')
 
