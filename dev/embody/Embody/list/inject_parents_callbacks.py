@@ -71,6 +71,24 @@ def onCook(scriptOp):
 	filter_dats = bool(getattr(parent.Embody.par, 'Filterdats', None)
 						and parent.Embody.par.Filterdats.eval())
 
+	# Tree vs flat: in flat mode the synthetic-parent rows that were
+	# injected above are removed before sorting / writing. Each real op
+	# stands on its own row at depth 0.
+	listmode_par = getattr(parent.Embody.par, 'Listmode', None)
+	flat_mode = (listmode_par.eval() == 'flat') if listmode_par else False
+	if flat_mode:
+		# Keep only paths that came from the input table (have a real op or
+		# at least a non-empty type/rel_file_path); drop pure synthetic
+		# ancestors injected above.
+		real_paths = {
+			path for path in all_paths
+			if data_rows[path].get('rel_file_path', '')
+			or data_rows[path].get('type', '')
+		}
+		all_paths = real_paths
+		if not all_paths:
+			return
+
 	def _row_is_dirty(row):
 		val = str(row.get('dirty', '')).strip()
 		return val not in ('', 'False', 'false', '0', 'Clean', 'Saved')
@@ -224,8 +242,14 @@ def onCook(scriptOp):
 
 	for path in visible:
 		row = data_rows[path]
-		depth = path.count('/') - min_depth
-		hc = '1' if path in has_children else '0'
+		# In flat mode every row is depth=0 with no expand markers; the tree
+		# logic above still ran but we collapse the visible shape here.
+		if flat_mode:
+			depth = 0
+			hc = '0'
+		else:
+			depth = path.count('/') - min_depth
+			hc = '1' if path in has_children else '0'
 
 		oper = op(path)
 		is_comp = oper and oper.family == 'COMP'

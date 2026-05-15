@@ -125,6 +125,9 @@ def onPulse(par):
 		parent.Embody.ext.TDN.ImportNetworkFromFile(file_path, target_path, clear_first=clear_first)
 		parent.Embody.ext.Embody._import_clear_first = False
 
+	elif par.name == 'Rebuildallfromtdn':
+		parent.Embody.ext.Embody.RebuildAllFromTdn()
+
 	return
 
 def onExpressionChange(par, val, prev):

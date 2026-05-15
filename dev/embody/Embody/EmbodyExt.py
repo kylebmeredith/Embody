@@ -59,8 +59,8 @@ class EmbodyExt:
         'Detectduplicatepaths', 'Localtimestamps',
         # Action menu / save UX (Phase 2.5)
         'Defaulttoxfolder', 'Defaultscriptfolder', 'Synconsave',
-        # Manager filters (Phase 4)
-        'Filterdirty', 'Filterdats',
+        # Manager filters + view mode (Phase 4)
+        'Filterdirty', 'Filterdats', 'Listmode',
         # TDN
         'Tdnmode',
         'Embeddatsintdns', 'Embedstorageintdns', 'Tdndatsafety',
@@ -4959,6 +4959,53 @@ class EmbodyExt:
                 self.Log(f'Saved {target.path}', 'SUCCESS')
         except Exception as e:
             self.Log(f'Save failed for {target.path}: {e}', 'ERROR')
+
+    def RebuildAllFromTdn(self) -> None:
+        """Rebuild every externalized COMP from its .tdn sidecar.
+
+        Walks all COMPs with par.externaltox set, computes the sidecar
+        .tdn path via _buildTDNRelPath, and calls ReloadFromTdn on each.
+        Skips COMPs whose .tdn is missing. Logs a per-COMP success/fail
+        and a summary at the end.
+
+        Use case: fresh git clone, bulk re-sync after `git pull`, or
+        recovery when in-TD state has drifted from the on-disk .tdn
+        files.
+        """
+        if self._performMode:
+            return
+        comps = self.getOpsByPar(COMP)
+        if not comps:
+            self.Log('RebuildAllFromTdn: nothing to do', 'INFO')
+            return
+        ok = 0
+        missing = 0
+        failed = 0
+        for comp in comps:
+            try:
+                rel_tdn = self._buildTDNRelPath(comp)
+                abs_tdn = self.buildAbsolutePath(rel_tdn)
+                if not abs_tdn.is_file():
+                    missing += 1
+                    continue
+                result = self.my.ext.TDN.ImportNetworkFromFile(
+                    str(abs_tdn), target_path=comp.path, clear_first=True)
+                if isinstance(result, dict) and result.get('error'):
+                    self.Log(
+                        f'RebuildAllFromTdn: failed for {comp.path}: '
+                        f'{result["error"]}', 'WARNING')
+                    failed += 1
+                else:
+                    ok += 1
+            except Exception as e:
+                self.Log(
+                    f'RebuildAllFromTdn: failed for {comp.path}: {e}',
+                    'WARNING')
+                failed += 1
+        self.Log(
+            f'RebuildAllFromTdn: rebuilt {ok}, missing .tdn {missing}, '
+            f'failed {failed}',
+            'SUCCESS' if failed == 0 else 'WARNING')
 
     def ReloadFromTdn(self, comp_path: str) -> None:
         """Rebuild a COMP from its .tdn sidecar on disk.
