@@ -54,23 +54,13 @@ class EmbodyExt:
     _PERSISTED_PARAMS = frozenset({
         # Core
         'Folder', 'Envoyenable', 'Envoyport', 'Aiclient',
-        # Tag names
-        'Toxtag', 'Tdntag', 'Pytag', 'Csvtag', 'Dattag',
-        'Htmltag', 'Jsontag', 'Mdtag', 'Rtftag', 'Txttag',
-        'Xmltag', 'Glsltag', 'Tsvtag',
-        # Tag colors
-        'Toxtagcolorr', 'Toxtagcolorg', 'Toxtagcolorb',
-        'Tdntagcolorr', 'Tdntagcolorg', 'Tdntagcolorb',
-        'Clonetagcolorr', 'Clonetagcolorg', 'Clonetagcolorb',
-        'Taggingmenucolorr', 'Taggingmenucolorg', 'Taggingmenucolorb',
-        'Dattagcolorr', 'Dattagcolorg', 'Dattagcolorb',
         # Behavior
         'Logfolder', 'Logtofile', 'Verbose', 'Print',
         'Detectduplicatepaths', 'Localtimestamps',
         # TDN
         'Tdnmode',
         'Embeddatsintdns', 'Embedstorageintdns', 'Tdndatsafety',
-        'Tdncascade', 'Tdncreateonstart', 'Tdnstriponsave',
+        'Tdncreateonstart', 'Tdnstriponsave',
         'Toxrestoreonstart', 'Datrestoreonstart', 'Filecleanup',
     })
 
@@ -111,42 +101,19 @@ class EmbodyExt:
             'chopexec', 'datexec', 'opexec', 'panelexec'
         ]
 
-        # Mapping: DAT type -> default tag parameter name
-        self.dat_type_to_tag = {
-            'text': 'Pytag',
-            'table': 'Tsvtag',
-            'execute': 'Pytag',
-            'parexec': 'Pytag',
-            'pargroupexec': 'Pytag',
-            'chopexec': 'Pytag',
-            'datexec': 'Pytag',
-            'opexec': 'Pytag',
-            'panelexec': 'Pytag'
-        }
-
-        # Mapping: file extension/language -> tag parameter name
-        self.extension_to_tag = {
-            'csv': 'Csvtag', 'dat': 'Dattag', 'frag': 'Glsltag',
-            'glsl': 'Glsltag', 'html': 'Htmltag', 'json': 'Jsontag',
-            'md': 'Mdtag', 'py': 'Pytag', 'rtf': 'Rtftag',
-            'tsv': 'Tsvtag', 'txt': 'Txttag', 'vert': 'Glsltag',
-            'xml': 'Xmltag', 'yml': 'Jsontag', 'yaml': 'Jsontag',
-            'python': 'Pytag', 'tscript': 'Pytag'
-        }
-
-        # Mapping: tag value -> language parameter value (for text DATs)
-        self.tag_to_language = {
-            'py': 'python', 'json': 'json', 'xml': 'xml',
-            'html': 'xml', 'glsl': 'glsl', 'frag': 'glsl',
-            'vert': 'glsl', 'txt': 'text',
-        }
-
-        # Tags where the extension parameter must be set explicitly
-        # (language alone gives the wrong file extension, or no language mapping exists)
-        self.tag_to_extension = {
-            'html': 'html', 'frag': 'frag', 'vert': 'vert',
-            'md': 'md', 'csv': 'csv', 'tsv': 'tsv',
-            'rtf': 'rtf', 'dat': 'dat',
+        # Default file extension for each supported DAT type.
+        # 'table' picks .tsv (TouchDesigner's native tab-separated format);
+        # everything else is Python source by default.
+        self.dat_type_to_extension = {
+            'text': 'py',
+            'table': 'tsv',
+            'execute': 'py',
+            'parexec': 'py',
+            'pargroupexec': 'py',
+            'chopexec': 'py',
+            'datexec': 'py',
+            'opexec': 'py',
+            'panelexec': 'py',
         }
 
         # Parameter tracker for detecting COMP changes
@@ -504,9 +471,8 @@ class EmbodyExt:
         if opToExternalize.family == 'COMP':
             file_extension = '.tox'
         elif opToExternalize.family == 'DAT':
-            tags = self.getTags()
-            found = [tag for tag in opToExternalize.tags if tag in tags]
-            file_extension = f'.{found[0]}' if found else None
+            existing = opToExternalize.par.file.eval()
+            file_extension = os.path.splitext(existing)[1] if existing else None
         else:
             file_extension = None
 
@@ -1009,9 +975,9 @@ class EmbodyExt:
     # INITIALIZATION & RESET
     # ==========================================================================
 
-    def Reset(self, removeTags: bool = False) -> None:
+    def Reset(self) -> None:
         """Reset Embody to initial state."""
-        parent.Embody.Disable(False, removeTags)
+        parent.Embody.Disable(False)
         run(f"op('{self.my}').UpdateHandler()", delayFrames=10)
         self.createExternalizationsTable()
         self.my.par.externaltox = ''
@@ -1037,17 +1003,12 @@ class EmbodyExt:
             externalizations_dat = self.my.parent().create(tableDAT, table_name)
             externalizations_dat.nodeX = self.my.nodeX - 200
             externalizations_dat.nodeY = self.my.nodeY
-            externalizations_dat.color = (
-                self.my.par.Dattagcolorr,
-                self.my.par.Dattagcolorg,
-                self.my.par.Dattagcolorb
-            )
+            externalizations_dat.color = (0.55, 0.55, 0.55)
             externalizations_dat.clear()
             externalizations_dat.appendRow([
                 'path', 'type', 'strategy', 'rel_file_path', 'timestamp',
                 'dirty', 'build', 'touch_build'
             ])
-            externalizations_dat.tags = [self.my.par.Tsvtag.eval()]
             self.Log(f"Created '{table_name}' tableDAT", "SUCCESS")
         else:
             externalizations_dat.clear(keepFirstRow=True)
@@ -1608,9 +1569,9 @@ class EmbodyExt:
     # ENABLE / DISABLE
     # ==========================================================================
 
-    def Disable(self, prevFolder: Union[str, bool, None] = False, removeTags: Union[bool, int] = False) -> None:
+    def Disable(self, prevFolder: Union[str, bool, None] = False) -> None:
         """
-        Disable Embody: clear external paths and optionally delete files/tags.
+        Disable Embody: clear external paths and delete tracked files.
         SAFETY: Only deletes files that Embody is tracking - never deletes
         untracked files that may exist in the externalization folder.
         """
@@ -1618,20 +1579,13 @@ class EmbodyExt:
         if prevFolder == '':
             folder = project.folder
 
-        tags = self.getTags()
-        
         # Collect all tracked file paths BEFORE clearing operator references
         tracked_files = self.getTrackedFilePaths()
         self.Log(f"Disable: Found {len(tracked_files)} tracked file(s) to clean up", "INFO")
-        
+
         # Clear COMP externalizations
         for oper in self.getExternalizedOps(COMP):
             oper.par.externaltox = ''
-            if removeTags:
-                for tag in tags:
-                    if tag in oper.tags:
-                        oper.tags.remove(tag)
-                self.resetOpColor(oper)
 
         # Clear DAT externalizations
         for oper in self.getExternalizedOps(DAT):
@@ -1641,21 +1595,6 @@ class EmbodyExt:
             except Exception as e:
                 self.Log(f"Failed to clear file params on {oper.path}: {e}", "DEBUG")
                 pass
-            if removeTags and str(self.Externalizations) not in oper.path:
-                for tag in tags:
-                    if tag in oper.tags:
-                        oper.tags.remove(tag)
-                self.resetOpColor(oper)
-
-        # Remove tags from ALL project operators (catches untracked tagged ops)
-        if removeTags:
-            tag_set = set(tags)
-            for oper in self.root.findChildren():
-                found = set(oper.tags) & tag_set
-                if found:
-                    for tag in found:
-                        oper.tags.remove(tag)
-                    self.resetOpColor(oper)
 
         # SAFELY delete only tracked files
         deleted_count = 0
@@ -1751,11 +1690,9 @@ class EmbodyExt:
         choice = ui.messageBox('Embody Warning',
             'Disable Embody?\nOnly files created by Embody will be deleted.\n'
             '(Non-Embody files in the folder will be preserved)',
-            buttons=['No', 'Yes, keep Tags', 'Yes, remove Tags'])
+            buttons=['No', 'Yes'])
         if choice == 1:
-            self.Disable(self.ExternalizationsFolder, False)
-        elif choice == 2:
-            self.Disable(self.ExternalizationsFolder, True)
+            self.Disable(self.ExternalizationsFolder)
 
     def UpdateHandler(self) -> None:
         """Enable/Update handler - main entry point for initialization."""
@@ -1907,8 +1844,8 @@ class EmbodyExt:
         ]
 
         # Subtractions: tracked but par was cleared. TDN-strategy COMPs are
-        # excluded -- their lifecycle is managed by _removeTDNStrategy(), not
-        # by par-presence detection. Full Project TDN exports track "/" in
+        # excluded -- their lifecycle is managed via RemoveTDNEntry, not
+        # par-presence detection. Full Project TDN exports track "/" in
         # the table without setting par.externaltox on the root.
         subtractions = [
             oper for oper in externalized_ops
@@ -1979,27 +1916,6 @@ class EmbodyExt:
     # ==========================================================================
     # OPERATOR QUERIES
     # ==========================================================================
-
-    def getTags(self, selection: Optional[str] = None) -> list[str]:
-        """Get all Embody tags, optionally filtered by type.
-
-        Args:
-            selection: 'tox' for TOX tag only, 'tdn' for TDN tag only,
-                       'comp' for both COMP tags, 'DAT' for DAT tags only,
-                       None for all tags.
-        """
-        tags = [par.val for par in self.my.pars('*tag')]
-        if selection == 'tox':
-            return [t for t in tags if t == self.my.par.Toxtag.val]
-        elif selection == 'tdn':
-            return [t for t in tags if t == self.my.par.Tdntag.val]
-        elif selection == 'comp':
-            comp_tags = {self.my.par.Toxtag.val, self.my.par.Tdntag.val}
-            return [t for t in tags if t in comp_tags]
-        elif selection == 'DAT':
-            comp_tags = {self.my.par.Toxtag.val, self.my.par.Tdntag.val}
-            return [t for t in tags if t not in comp_tags]
-        return tags
 
     def getExternalizedOps(self, opFamily: type, strategy: Optional[str] = None) -> list[OP]:
         """Get all externalized operators of a given family from the table.
@@ -2317,22 +2233,12 @@ class EmbodyExt:
                         'enableexternaltox': enable_val,
                     })
 
-        # Phase 1b: Collect Embody tags to strip from all descendants
-        # (including the target itself). Recipients don't need Embody
-        # metadata -- it would cause confusion if they have Embody installed.
-        embody_tags = set(self.getTags())
-        saved_tags = []  # list of (op_ref, set_of_removed_tags)
-
-        # Check target itself, then all descendants
-        for op_ref in [target] + target.findChildren():
-            found = set(op_ref.tags) & embody_tags
-            if found:
-                saved_tags.append((op_ref, found))
+        # Phase 1b: Embody no longer applies tags to operators (par-driven
+        # discovery replaced the tag system), so no tag-strip step is needed.
 
         self.Log(
             f"Exporting portable .tox: stripping {len(saved_state)} "
-            f"file reference(s) and {len(saved_tags)} tagged operator(s) "
-            f"from {target.path}", "INFO")
+            f"file reference(s) from {target.path}", "INFO")
 
         # Phase 2: Strip all collected relative references.
         for entry in saved_state:
@@ -2348,15 +2254,6 @@ class EmbodyExt:
                     op_ref.par.enableexternaltox = False
             except Exception as e:
                 self.Log(f"Failed to strip {entry['op'].path}: {e}", "WARNING")
-
-        # Strip Embody tags.
-        for op_ref, tags_to_remove in saved_tags:
-            try:
-                for tag in tags_to_remove:
-                    op_ref.tags.remove(tag)
-            except Exception as e:
-                self.Log(
-                    f"Failed to strip tags from {op_ref.path}: {e}", "WARNING")
 
         # Phase 3: Save the .tox.
         success = False
@@ -2387,15 +2284,6 @@ class EmbodyExt:
             except Exception as e:
                 self.Log(
                     f"Failed to restore {entry['op'].path}: {e}", "WARNING")
-
-        # Restore Embody tags (always, even on save failure).
-        for op_ref, tags_to_restore in saved_tags:
-            try:
-                for tag in tags_to_restore:
-                    op_ref.tags.add(tag)
-            except Exception as e:
-                self.Log(
-                    f"Failed to restore tags on {op_ref.path}: {e}", "WARNING")
 
         return success
 
@@ -2621,8 +2509,8 @@ class EmbodyExt:
 
         for oper in self.getExternalizedOps(COMP) + self.getExternalizedOps(DAT):
             # TDN-strategy COMPs don't use externaltox -- their rel_file_path
-            # is managed by _handleTDNAddition / _addToTable, not the par.
-            # Skip them here to avoid overwriting the .tdn path with "".
+            # tracks the .tdn sidecar. Skip them here to avoid overwriting
+            # the .tdn path with "".
             if oper.family == 'COMP' and self._getCompStrategy(oper) == 'tdn':
                 if self.param_tracker.compareParameters(oper):
                     param_changes.append(oper.path)
@@ -2660,12 +2548,12 @@ class EmbodyExt:
     # ==========================================================================
 
     def handleAddition(self, oper: OP) -> None:
-        """Process a newly tagged operator for externalization."""
-        # Route TDN-tagged COMPs to the TDN handler
-        if oper.family == 'COMP' and self.my.par.Tdntag.val in oper.tags:
-            self._handleTDNAddition(oper)
-            return
+        """Process a newly par-set operator for externalization.
 
+        Every COMP gets both .tox (canonical) and .tdn (diffable sidecar).
+        DATs are written based on their par.file extension. Routing by
+        tag is gone -- discovery is purely par-driven.
+        """
         abs_folder_path, save_file_path, rel_directory, rel_file_path = \
             self.getOpPaths(oper, self.my.par.Folder.val)
 
@@ -2702,63 +2590,6 @@ class EmbodyExt:
         # Table mutation is no longer done inline -- the table is rebuilt
         # from a live par-driven scan via _scanAndPopulate() at end of Update.
         self.Log(f"Added '{oper.path}'", "SUCCESS")
-
-    def _handleTDNAddition(self, oper: OP) -> None:
-        """Process a newly TDN-tagged COMP for externalization."""
-        rel_path = self._buildTDNRelPath(oper)
-        abs_path = self.buildAbsolutePath(rel_path)
-
-        # Create directory
-        try:
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            self.Log(f"Error creating directory {abs_path.parent}", "ERROR", str(e))
-
-        # Setup build parameters
-        build_page = next((p for p in oper.customPages if p.name == 'About'), None)
-        if not build_page:
-            build_page = oper.appendCustomPage('About')
-
-        current_build = 1
-        if hasattr(oper.par, 'Build'):
-            current_build = oper.par.Build.eval()
-        self.setupBuildParameters(oper, build_page, current_build, app.build)
-
-        # Export TDN -- protect .tdn files belonging to OTHER tracked
-        # TDN COMPs so the stale-file cleanup doesn't delete them.
-        # Without this, bottom-up addition order causes parent exports
-        # to delete children's .tdn files as "stale".
-        protected = self._getAllTrackedTDNFiles(exclude_path=oper.path)
-        result = self.my.ext.TDN.ExportNetwork(
-            root_path=oper.path, output_file=str(abs_path),
-            cleanup_protected=protected)
-
-        if result.get('success'):
-            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            build_num = int(oper.par.Build.eval()) if hasattr(oper.par, 'Build') else 1
-            touch_build = str(oper.par.Touchbuild.eval()) if hasattr(oper.par, 'Touchbuild') else app.build
-            self.param_tracker.updateParamStore(oper)
-            self._addToTable(oper, str(rel_path), timestamp, False,
-                             build_num, touch_build, 'tdn')
-            self.Log(f"Added TDN '{oper.path}'", "SUCCESS")
-
-            # Cascade: auto-tag child COMPs if enabled
-            if self.my.par.Tdncascade.eval():
-                self._cascadeTDNTag(oper)
-        else:
-            self.Log(f"TDN export failed for {oper.path}: {result.get('error')}", "ERROR")
-
-    def _cascadeTDNTag(self, parent_comp: OP) -> None:
-        """Auto-tag direct child COMPs for TDN externalization.
-
-        Uses depth=1 (direct children only). Recursion happens naturally
-        through the applyTagToOperator -> _handleTDNAddition ->
-        _cascadeTDNTag chain, processing each level in order.
-        """
-        tdn_tag = self.my.par.Tdntag.val
-        for child in parent_comp.findChildren(type=COMP, depth=1):
-            if tdn_tag not in child.tags:
-                self.applyTagToOperator(child, tdn_tag)
 
     def _buildTDNRelPath(self, oper: OP) -> Path:
         """Generate a flat relative .tdn file path for a COMP.
@@ -2982,8 +2813,7 @@ class EmbodyExt:
 
         Disabled in the fork -- Build/Date/Touchbuild auto-injection on
         externalized COMPs added noise to user networks. Signature kept
-        intact so existing callers (handleAddition, _handleTDNAddition)
-        continue to work.
+        intact so existing callers (handleAddition) continue to work.
 
         TODO: re-enable behind an opt-in setting (e.g. a Toggle on the
         Embody COMP named "Autoinjectbuildinfo"). For now, the body is
@@ -2998,14 +2828,12 @@ class EmbodyExt:
     def _buildPathGroups(self) -> dict:
         """Map normalized external paths to lists of operators sharing them.
 
-        Only includes operators with Embody tags that are not inside
-        TD clone hierarchies or replicator outputs.
+        Includes par-set externalizations only. Excludes clones, replicants.
         """
-        embody_tags = self.getTags()
         path_groups = {}
 
         for oper in self.root.findChildren(type=COMP, parName='externaltox'):
-            if not any(tag in oper.tags for tag in embody_tags):
+            if not oper.par.externaltox.eval():
                 continue
             if self.isInsideClone(oper) or self.isReplicant(oper):
                 continue
@@ -3014,7 +2842,9 @@ class EmbodyExt:
                 path_groups.setdefault(path, []).append(oper)
 
         for oper in self.root.findChildren(type=DAT, parName='file'):
-            if not any(tag in oper.tags for tag in embody_tags):
+            if not oper.par.file.eval():
+                continue
+            if oper.type not in self.supported_dat_types:
                 continue
             if self.isInsideClone(oper) or self.isReplicant(oper):
                 continue
@@ -3246,971 +3076,44 @@ class EmbodyExt:
             f"({len(clones)} clone{plural})", "SUCCESS")
 
     def _handleDuplicateAsReference(self, oper):
-        """Mark duplicate as intentional clone reference."""
+        """Mark duplicate as intentional clone reference.
+
+        Adds the TD-native 'clone' tag so the duplicate-detection scan
+        can skip this op on future runs. Table mutation is no longer
+        done here -- _scanAndPopulate() at end of Update rebuilds the
+        table view.
+        """
         oper.tags.add('clone')
-        oper.color = (self.my.par.Clonetagcolorr,
-                      self.my.par.Clonetagcolorg,
-                      self.my.par.Clonetagcolorb)
-
-        rel_file_path = self.getExternalPath(oper)
-
-        # Add to table if not already present
-        row_exists = any(
-            self.Externalizations[row, 'path'] == oper.path
-            for row in range(1, self.Externalizations.numRows)
-        )
-
-        if not row_exists:
-            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            if oper.family == 'COMP':
-                strategy = 'tox'
-                build_num = int(oper.par.Build.eval())
-                touch_build = str(oper.par.Touchbuild.eval())
-            else:
-                strategy = oper.type
-                build_num = ''
-                touch_build = ''
-
-            has_strategy_col = self.Externalizations[0, 'strategy'] is not None
-            has_position_cols = self.Externalizations[0, 'node_x'] is not None
-
-            node_x = str(int(oper.nodeX)) if has_position_cols else ''
-            node_y = str(int(oper.nodeY)) if has_position_cols else ''
-            node_color = ''
-            if has_position_cols:
-                c = oper.color
-                node_color = f'{c[0]:.4f},{c[1]:.4f},{c[2]:.4f}'
-
-            if has_strategy_col:
-                row_data = [
-                    oper.path, oper.type, strategy, rel_file_path,
-                    timestamp, '', build_num, touch_build
-                ]
-                if has_position_cols:
-                    row_data.extend([node_x, node_y, node_color])
-                self.Externalizations.appendRow(row_data)
-            else:
-                self.Externalizations.appendRow([
-                    oper.path, oper.type, rel_file_path, timestamp,
-                    '', build_num, touch_build
-                ])
-
         self.Log(f"Added 'clone' tag to {oper.path}", "SUCCESS")
 
-
-    # ==========================================================================
-    # TAGGING UI
-    # ==========================================================================
-
-    def TagGetter(self) -> None:
-        """Open tagging menu for rollover operator."""
-        if self._performMode:
-            return
-        params = self.tagger.op('tags')
-        switch = self.tagger.op('switch_family')
-        oper = ui.rolloverOp
-        self.rolloverOp = oper
-
-        # Validation
-        if oper is None:
-            return
-
-        if oper.type == 'engine':
-            ui.messageBox('Embody Error', f"'{oper.type}' type not supported.", buttons=['Ok'])
-            return
-
-        if self.isReplicant(oper) or self.isClone(oper) or self.isInsideClone(oper):
-            ui.messageBox('Embody Warning', 
-                f"'{oper.path}' is a replicant or clone and cannot be externalized.", 
-                buttons=['Ok'])
-            return
-
-        # Route based on family + tag state
-        if oper.type in self.supported_dat_types:
-            switch.par.index = 1
-            active_tag = self._getActiveDATTag(oper)
-            if active_tag:
-                run(lambda: self.SetupTaggerDATManageMode(oper, active_tag), delayFrames=1)
-                run(f"op('{self.tagging_menu_window}').par.winopen.pulse()", delayFrames=2)
-                return
-        elif oper.family == 'COMP':
-            switch.par.index = 2
-            tox_tag = self.my.par.Toxtag.val
-            tdn_tag = self.my.par.Tdntag.val
-            if tox_tag in oper.tags:
-                run(lambda: self.SetupTaggerManageMode(oper, 'TOX_'), delayFrames=1)
-                run(f"op('{self.tagging_menu_window}').par.winopen.pulse()", delayFrames=2)
-                return
-            elif tdn_tag in oper.tags:
-                run(lambda: self.SetupTaggerManageMode(oper, 'TDN_'), delayFrames=1)
-                run(f"op('{self.tagging_menu_window}').par.winopen.pulse()", delayFrames=2)
-                return
-        else:
-            ui.messageBox('Embody Error',
-                'Tags can only be applied to COMPs or supported DATs.',
-                buttons=['Ok'])
-            return
-
-        # Untagged operator -- show tag selection
-        run(lambda: self.SetupTaggerTagMode(oper), delayFrames=1)
-        run(f"op('{self.tagging_menu_window}').par.winopen.pulse()", delayFrames=2)
-
-    def SetupTagger(self, oper: OP) -> None:
-        """Configure tagger button colors."""
-        params = self.tagger.op('tags')
-
-        for i in range(1, params.numRows):
-            button = self.tagger.op(f'button{i}')
-            if button:
-                button.par.colorr = self.my.par.Taggingmenucolorr
-                button.par.colorg.expr = self._alternateColor('parent.Embody.par.Taggingmenucolorg')
-                button.par.colorb = self.my.par.Taggingmenucolorb
-
-    def _alternateColor(self, color_ref):
-        """Generate alternating color expression."""
-        return f'{color_ref} if me.digits % 2 else {color_ref} - 0.05'
-
-    def SetupTaggerManageMode(self, oper: OP, strategy_state: str) -> None:
-        """Configure tagger for manage mode on an already-tagged COMP.
-
-        Shows Switch/Remove buttons for tox/tdn plus Save.
-        """
-        self._tagger_mode = 'manage'
-        self.rolloverOp = oper
-
-        # Ensure switch is set to COMP tags (tox/tdn only)
-        switch = self.tagger.op('switch_family')
-        if switch:
-            switch.par.index = 2
-
-        # Keep replicated tag buttons visible and highlight active tag
-        self.SetupTagger(oper)
-
-        # Set dynamic labels on tag buttons based on current strategy
-        is_tox = strategy_state.startswith('TOX_')
-        tox_btn = self.tagger.op('button1')
-        tdn_btn = self.tagger.op('button2')
-        if tox_btn:
-            tox_btn.par.display = True
-            tox_btn.par.label = '\u00d7  Remove tox' if is_tox else '\u21c4  Convert to tox'
-        if tdn_btn:
-            tdn_btn.par.display = True
-            tdn_btn.par.label = '\u00d7  Remove tdn' if not is_tox else '\u21c4  Convert to tdn'
-
-        # Hide any extra DAT-tag buttons (safety net for replicator timing)
-        for i in range(3, 16):
-            btn = self.tagger.op(f'button{i}')
-            if btn:
-                btn.par.display = False
-
-        # Show Save button
-        btn_save = self.tagger.op('btn_save')
-        if btn_save:
-            btn_save.par.display = True
-            btn_save.par.label = '\u2193  Save tox' if is_tox else '\u2193  Save tdn'
-            btn_save.par.colorr = self.my.par.Taggingmenucolorr.eval()
-            btn_save.par.colorg = self.my.par.Taggingmenucolorg.eval()
-            btn_save.par.colorb = self.my.par.Taggingmenucolorb.eval()
-
-        # Show Reload button
-        btn_reload = self.tagger.op('btn_reload')
-        if btn_reload:
-            btn_reload.par.display = True
-            btn_reload.par.label = '\u21bb  Reload tox' if is_tox else '\u21bb  Reload tdn'
-            btn_reload.par.colorr = self.my.par.Taggingmenucolorr.eval()
-            btn_reload.par.colorg = self.my.par.Taggingmenucolorg.eval()
-            btn_reload.par.colorb = self.my.par.Taggingmenucolorb.eval()
-
-        # Show Embed DATs toggle (TDN COMPs only)
-        btn_embed = self.tagger.op('btn_embed')
-        embed_visible = not is_tox
-        if btn_embed:
-            btn_embed.par.display = embed_visible
-            if embed_visible:
-                per_comp = oper.fetch('embed_dats_in_tdn', None, search=False)
-                effective = per_comp if per_comp is not None else self.my.par.Embeddatsintdns.eval()
-                btn_embed.par.label = '\u229e  Embed DATs in tdn  \u2713' if effective else '\u229e  Embed DATs in tdn'
-                btn_embed.par.colorr = self.my.par.Taggingmenucolorr.eval()
-                btn_embed.par.colorg = self.my.par.Taggingmenucolorg.eval()
-                btn_embed.par.colorb = self.my.par.Taggingmenucolorb.eval()
-
-        # Show Embed Storage toggle (TDN COMPs only)
-        btn_embed_storage = self.tagger.op('btn_embed_storage')
-        if btn_embed_storage:
-            btn_embed_storage.par.display = embed_visible
-            if embed_visible:
-                per_comp = oper.fetch('embed_storage_in_tdn', None, search=False)
-                effective = per_comp if per_comp is not None else self.my.par.Embedstorageintdns.eval()
-                btn_embed_storage.par.label = '\u229e  Embed storage in tdn  \u2713' if effective else '\u229e  Embed storage in tdn'
-                btn_embed_storage.par.colorr = self.my.par.Taggingmenucolorr.eval()
-                btn_embed_storage.par.colorg = self.my.par.Taggingmenucolorg.eval()
-                btn_embed_storage.par.colorb = self.my.par.Taggingmenucolorb.eval()
-
-        # Show Export portable tox button
-        btn_portable = self.tagger.op('btn_portable')
-        if btn_portable:
-            btn_portable.par.display = True
-            btn_portable.par.label = '\u2197  Export portable tox'
-            btn_portable.par.colorr = self.my.par.Taggingmenucolorr.eval()
-            btn_portable.par.colorg = self.my.par.Taggingmenucolorg.eval()
-            btn_portable.par.colorb = self.my.par.Taggingmenucolorb.eval()
-
-        # Hide Remove button (use Remove tox/tdn buttons instead)
-        btn_remove = self.tagger.op('btn_remove')
-        if btn_remove:
-            btn_remove.par.display = False
-
-        # Show Open file button with platform-specific label
-        btn_openfile = self.tagger.op('btn_openfile')
-        strategy = 'tdn' if strategy_state.startswith('TDN') else 'tox'
-        rel_fp = self._getStrategyFilePath(oper.path, strategy) or ''
-        self.tagger.store('manage_file_path', rel_fp)
-        if btn_openfile:
-            btn_openfile.par.display = bool(rel_fp)
-            label = '\u25ce  Reveal in Finder' if sys.platform.startswith('darwin') else '\u25ce  Reveal in Explorer'
-            btn_openfile.par.label = label
-
-        # Update header text
-        title = self.tagger.op('header/text1')
-        if title:
-            title.par.text = 'Actions'
-
-        # Update height: header + 2 tag buttons + Save + Reload + Export Portable
-        # (+ Embed DATs for TDN) (+ Embed Storage for TDN) (+ Open file if applicable)
-        visible_count = 6 + (2 if embed_visible else 0) + (1 if rel_fp else 0)
-        self.tagger.store('visible_count', visible_count)
-
-    def SetupTaggerDATManageMode(self, oper: OP, active_tag: str) -> None:
-        """Configure tagger for manage mode on an already-tagged DAT.
-
-        Shows Convert to <format> options, Remove, and Reveal in Finder.
-        """
-        self._tagger_mode = 'manage'
-        self.rolloverOp = oper
-
-        # Ensure switch is set to DAT tags
-        switch = self.tagger.op('switch_family')
-        if switch:
-            switch.par.index = 1
-
-        self.SetupTagger(oper)
-
-        # COMP tags that should not appear as "Convert to" options for DATs
-        comp_tags = {self.my.par.Toxtag.val, self.my.par.Tdntag.val}
-
-        # Use replicated buttons for "Convert to <format>" options
-        tags = self.tagger.op('tags')
-        convert_count = 0
-        for i in range(1, tags.numRows):
-            btn = self.tagger.op(f'button{i}')
-            if btn:
-                tag_val = tags[i, 'value'].val
-                if tag_val == active_tag or tag_val in comp_tags:
-                    btn.par.display = False
-                else:
-                    btn.par.display = True
-                    btn.par.label = f'\u21c4  Convert to {tag_val}'
-                    convert_count += 1
-
-        # Hide Save button (DATs use syncfile)
-        btn_save = self.tagger.op('btn_save')
-        if btn_save:
-            btn_save.par.display = False
-
-        # Show Remove button
-        btn_remove = self.tagger.op('btn_remove')
-        if btn_remove:
-            btn_remove.par.display = True
-            btn_remove.par.label = '\u00d7  Remove externalization'
-            btn_remove.par.colorr = self.my.par.Taggingmenucolorr.eval()
-            btn_remove.par.colorg = self.my.par.Taggingmenucolorg.eval()
-            btn_remove.par.colorb = self.my.par.Taggingmenucolorb.eval()
-
-        # Hide portable tox, reload, and embed (COMP-only actions)
-        btn_portable = self.tagger.op('btn_portable')
-        if btn_portable:
-            btn_portable.par.display = False
-        btn_reload = self.tagger.op('btn_reload')
-        if btn_reload:
-            btn_reload.par.display = False
-        btn_embed = self.tagger.op('btn_embed')
-        if btn_embed:
-            btn_embed.par.display = False
-        btn_embed_storage = self.tagger.op('btn_embed_storage')
-        if btn_embed_storage:
-            btn_embed_storage.par.display = False
-
-        # Show Reveal in Finder/Explorer
-        btn_openfile = self.tagger.op('btn_openfile')
-        rel_fp = self.getExternalPath(oper)
-        self.tagger.store('manage_file_path', rel_fp or '')
-        if btn_openfile:
-            btn_openfile.par.display = bool(rel_fp)
-            label = '\u25ce  Reveal in Finder' if sys.platform.startswith('darwin') else '\u25ce  Reveal in Explorer'
-            btn_openfile.par.label = label
-
-        # Update header
-        title = self.tagger.op('header/text1')
-        if title:
-            title.par.text = 'Actions'
-
-        # Height: header + convert buttons + Remove + (Reveal if applicable)
-        visible_count = 1 + convert_count + 1 + (1 if rel_fp else 0)
-        self.tagger.store('visible_count', visible_count)
-
-    def SetupTaggerTagMode(self, oper: OP) -> None:
-        """Restore tagger to tag selection mode, then set up colors."""
-        self._tagger_mode = 'tag'
-
-        # Hide manage buttons
-        btn_save = self.tagger.op('btn_save')
-        btn_reload = self.tagger.op('btn_reload')
-        btn_remove = self.tagger.op('btn_remove')
-        btn_openfile = self.tagger.op('btn_openfile')
-        btn_portable = self.tagger.op('btn_portable')
-        btn_embed = self.tagger.op('btn_embed')
-        btn_embed_storage = self.tagger.op('btn_embed_storage')
-        if btn_save:
-            btn_save.par.display = False
-        if btn_reload:
-            btn_reload.par.display = False
-        if btn_embed:
-            btn_embed.par.display = False
-        if btn_embed_storage:
-            btn_embed_storage.par.display = False
-        if btn_remove:
-            btn_remove.par.display = False
-        if btn_openfile:
-            btn_openfile.par.display = False
-        if btn_portable:
-            btn_portable.par.display = False
-
-        # Find if operator already has an Embody tag
-        tags = self.tagger.op('tags')
-        existing_tag = None
-        existing_tag_index = None
-        for i in range(1, tags.numRows):
-            tag_val = tags[i, 'value'].val
-            if tag_val in oper.tags:
-                existing_tag = tag_val
-                existing_tag_index = i
-                break
-
-        # Mutual exclusivity: if already tagged, only show Remove for
-        # the active tag. If untagged, show all Add options.
-        visible_count = 0
-        for i in range(1, tags.numRows):
-            btn = self.tagger.op(f'button{i}')
-            if btn:
-                tag_val = tags[i, 'value'].val
-                if existing_tag is not None:
-                    if i == existing_tag_index:
-                        btn.par.display = True
-                        btn.par.label = f'\u00d7  Remove {tag_val}'
-                        visible_count += 1
-                    else:
-                        btn.par.display = False
-                else:
-                    btn.par.display = True
-                    btn.par.label = f'+  Add {tag_val}'
-                    visible_count += 1
-
-        # Restore header text
-        title = self.tagger.op('header/text1')
-        if title:
-            title.par.text = 'Externalize'
-
-        # Update height to match visible button count (+1 for header row)
-        self.tagger.store('visible_count', visible_count + 1)
-
-        # Delegate to existing color setup
-        self.SetupTagger(oper)
-
-    def TagSetter(self, oper: OP, tag: str) -> bool:
-        """Toggle a tag on an operator. Enforces mutual exclusivity."""
-        color = self._getTagColor(oper, tag)
-        if color is None:
-            return False
-
-        if tag not in oper.tags:
-            # Enforce mutual exclusivity: only one tag at a time
-            if oper.family == 'COMP':
-                tox_tag = self.my.par.Toxtag.val
-                tdn_tag = self.my.par.Tdntag.val
-                other_tag = tdn_tag if tag == tox_tag else tox_tag
-                if other_tag in oper.tags:
-                    self._removeCompStrategy(oper, other_tag)
-            elif oper.family == 'DAT':
-                # Remove any existing DAT tag before adding the new one
-                dat_tags = self.getTags('DAT')
-                for existing in list(oper.tags):
-                    if existing in dat_tags:
-                        oper.tags.remove(existing)
-                        rel_file_path = self.getExternalPath(oper)
-                        self.RemoveListerRow(oper.path, rel_file_path)
-                        oper.par.file = ''
-                        oper.par.file.readOnly = False
-                        break
-
-            oper.tags.add(tag)
-            oper.color = color
-            self._setDATLanguageForTag(oper, tag)
-        else:
-            oper.tags.remove(tag)
-            self.resetOpColor(oper)
-
-            delete_file = self._shouldDeleteFile()
-            if oper.family == 'COMP':
-                if tag == self.my.par.Toxtag.val:
-                    rel_file_path = self.getExternalPath(oper)
-                    self.RemoveListerRow(oper.path, rel_file_path,
-                                         delete_file=delete_file)
-                    oper.par.externaltox = ''
-                    oper.par.externaltox.readOnly = False
-                elif tag == self.my.par.Tdntag.val:
-                    self._removeTDNStrategy(oper.path,
-                                            delete_file=delete_file)
-            elif oper.family == 'DAT':
-                rel_file_path = self.getExternalPath(oper)
-                self.RemoveListerRow(oper.path, rel_file_path,
-                                     delete_file=delete_file)
-                oper.par.file = ''
-                oper.par.file.readOnly = False
-
-        return True
-
-    def _shouldDeleteFile(self) -> bool:
-        """Check the File Cleanup preference parameter.
-
-        Returns True if external files should be deleted, False to keep them.
-        When set to 'ask', shows a confirmation dialog.
-        """
-        filecleanup_par = getattr(self.my.par, 'Filecleanup', None)
-        preference = filecleanup_par.eval() if filecleanup_par else 'ask'
-        if preference == 'keep':
-            return False
-        elif preference == 'delete':
-            return True
-        else:  # 'ask'
-            choice = ui.messageBox(
-                'Delete External File?',
-                'Also delete the external file from disk?',
-                buttons=['Keep File', 'Delete File',
-                         'Always Keep', 'Always Delete'])
-            if choice == 0:
-                return False
-            elif choice == 1:
-                return True
-            elif choice == 2:
-                if filecleanup_par:
-                    self.my.par.Filecleanup = 'keep'
-                    self.Log('File cleanup preference set to Always Keep', 'INFO')
-                return False
-            elif choice == 3:
-                if filecleanup_par:
-                    self.my.par.Filecleanup = 'delete'
-                    self.Log('File cleanup preference set to Always Delete', 'INFO')
-                return True
-            else:
-                return False  # Dialog closed
-
-    def _removeCompStrategy(self, oper: OP, tag: str) -> None:
-        """Remove a COMP strategy tag and clean up its externalization."""
-        delete_file = self._shouldDeleteFile()
-        oper.tags.discard(tag)
-        if tag == self.my.par.Toxtag.val:
-            rel_file_path = self.getExternalPath(oper)
-            self.RemoveListerRow(oper.path, rel_file_path,
-                                 delete_file=delete_file)
-            oper.par.externaltox = ''
-            oper.par.externaltox.readOnly = False
-        elif tag == self.my.par.Tdntag.val:
-            self._removeTDNStrategy(oper.path, delete_file=delete_file)
-
-    def _removeTDNStrategy(self, op_path: str, delete_file: bool = True) -> None:
-        """Remove TDN strategy entry from table and optionally delete .tdn file."""
-        table = self.Externalizations
-        if not table:
-            self.Log(f"_removeTDNStrategy: no table!", "WARNING")
-            return
-        if table[0, 'strategy'] is None:
-            self.Log(f"_removeTDNStrategy: no strategy column!", "WARNING")
-            return  # Legacy table without strategy column -- no TDN entries
-        self.Log(f"_removeTDNStrategy: searching for '{op_path}' delete_file={delete_file} rows={table.numRows}", "INFO")
-        for i in range(1, table.numRows):
-            if (table[i, 'path'].val == op_path
-                    and table[i, 'strategy'].val == 'tdn'):
-                rel_path = table[i, 'rel_file_path'].val
-                self.Log(f"_removeTDNStrategy: found row {i}, rel_path='{rel_path}' delete_file={delete_file}", "INFO")
-                if delete_file and rel_path:
-                    full_path = self.buildAbsolutePath(
-                        self.normalizePath(rel_path)).resolve()
-                    self.Debug(f"TDN delete: rel='{rel_path}' abs='{full_path}' exists={full_path.is_file()} suffix='{full_path.suffix}'")
-                    def _delete(fp=full_path, rp=rel_path, opp=op_path):
-                        try:
-                            debug(f"_delete executing: {fp} exists={fp.is_file()}")
-                            if fp.is_file() and fp.suffix.lower() == '.tdn':
-                                fp.unlink()
-                                self.Log(f'Removed TDN externalization for {opp} ({rp})', 'SUCCESS')
-                            else:
-                                debug(f"_delete skipped: is_file={fp.is_file()} suffix={fp.suffix}")
-                        except Exception as e:
-                            self.Log(f'Error removing TDN file: {e}', 'ERROR')
-                    run(_delete, delayFrames=5)
-                table.deleteRow(i)
-                # Also remove orphaned child entries whose operators
-                # no longer exist (the parent COMP was deleted/lost).
-                self._removeOrphanedTDNChildren(op_path)
-                return
-
-    def _removeOrphanedTDNChildren(self, parent_path: str) -> None:
-        """Remove table entries for children of a removed TDN COMP.
-
-        Only removes entries where the operator no longer exists,
-        preventing accidental deletion of valid entries.
-        """
-        table = self.Externalizations
-        prefix = parent_path + '/'
-        rows_to_delete = []
-
-        for i in range(1, table.numRows):
-            child_path = table[i, 'path'].val
-            if child_path.startswith(prefix) and not op(child_path):
-                rows_to_delete.append(i)
-
-        # Delete in reverse order to preserve row indices
-        for i in reversed(rows_to_delete):
-            rel_file = table[i, 'rel_file_path'].val
-            self.Log(f"Removed orphaned child entry: {table[i, 'path'].val}", "INFO")
-            table.deleteRow(i)
-
-    def _getTagColor(self, oper, tag):
-        """Get appropriate color for tag on operator, or None if invalid."""
-        if oper.family == 'COMP':
-            if tag == self.my.par.Toxtag.val:
-                return (self.my.par.Toxtagcolorr, self.my.par.Toxtagcolorg, self.my.par.Toxtagcolorb)
-            elif tag == self.my.par.Tdntag.val:
-                return (self.my.par.Tdntagcolorr, self.my.par.Tdntagcolorg, self.my.par.Tdntagcolorb)
-            self.Log("Use TOX or TDN tag for COMPs", "ERROR")
-            return None
-        elif oper.family == 'DAT':
-            if tag in self.getTags('DAT') and oper.type in self.supported_dat_types:
-                return (self.my.par.Dattagcolorr, self.my.par.Dattagcolorg, self.my.par.Dattagcolorb)
-            self.Log("DAT tags can only be applied to supported DAT types", "ERROR")
-            return None
-
-        self.Log("Tags can only be applied to COMPs or DATs", "ERROR")
-        return None
-
-    def _getActiveDATTag(self, oper: OP) -> Optional[str]:
-        """Return the active Embody DAT tag on an operator, or None."""
-        dat_tags = self.getTags('DAT')
-        for tag in dat_tags:
-            if tag in oper.tags:
-                return tag
-        return None
-
-    def _inferDATTagValue(self, oper) -> str:
-        """Infer the best externalization tag value for a DAT operator.
-        Returns tag value string (e.g. 'py', 'txt', 'tsv') for applyTagToOperator().
-        """
-        if oper.type != 'text':
-            tag_param = self.dat_type_to_tag.get(oper.type, 'Pytag')
-            return getattr(self.my.par, tag_param).eval()
-
-        lang = oper.par.language.eval() if hasattr(oper.par, 'language') else ''
-        ext = oper.par.extension.eval() if hasattr(oper.par, 'extension') else ''
-        tag_param = self.extension_to_tag.get(lang) or self.extension_to_tag.get(ext) or 'Pytag'
-        return getattr(self.my.par, tag_param).eval()
-
-    def _setDATLanguageForTag(self, oper, tag):
-        """Set the language and/or extension on a text DAT to match the tag."""
-        if oper.family != 'DAT' or oper.type != 'text':
-            return
-        lang = self.tag_to_language.get(tag)
-        if lang:
-            oper.par.language = lang
-        ext = self.tag_to_extension.get(tag)
-        if ext:
-            oper.par.extension = ext
-
-    def applyTagToOperator(self, oper: OP, tag: str) -> bool:
-        """Apply a tag to an operator. Enforces mutual exclusivity."""
-        color = self._getTagColor(oper, tag)
-        if color is None:
-            return False
-
-        if tag not in oper.tags:
-            # Enforce mutual exclusivity: only one tag at a time
-            if oper.family == 'COMP':
-                tox_tag = self.my.par.Toxtag.val
-                tdn_tag = self.my.par.Tdntag.val
-                other_tag = tdn_tag if tag == tox_tag else tox_tag
-                if other_tag in oper.tags:
-                    self._removeCompStrategy(oper, other_tag)
-            elif oper.family == 'DAT':
-                dat_tags = self.getTags('DAT')
-                for existing in list(oper.tags):
-                    if existing in dat_tags:
-                        oper.tags.remove(existing)
-                        rel_file_path = self.getExternalPath(oper)
-                        self.RemoveListerRow(oper.path, rel_file_path)
-                        oper.par.file = ''
-                        oper.par.file.readOnly = False
-                        self.Log(f"Removed existing '{existing}' tag from '{oper.path}' (replaced by '{tag}')", "INFO")
-                        break
-
-            oper.tags.add(tag)
-            oper.color = color
-            self._setDATLanguageForTag(oper, tag)
-            self.Log(f"Tag '{tag}' applied to '{oper.path}'", "SUCCESS")
-
-            if oper.family == 'COMP' and tag == self.my.par.Toxtag.val:
-                if oper.par.externaltox.eval():
-                    rel_file_path = self.normalizePath(oper.par.externaltox.eval())
-                    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-                    self.Externalizations.appendRow([
-                        oper.path, oper.type, 'tox', rel_file_path,
-                        timestamp, oper.dirty, '', ''
-                    ])
-                    self.Log(f"Added existing TOX externalization to table", "SUCCESS")
-            elif oper.family == 'COMP' and tag == self.my.par.Tdntag.val:
-                self._handleTDNAddition(oper)
-
-        return True
-
-    def TagExiter(self) -> None:
-        """Close tagging menu and reset mode."""
-        self._tagger_mode = 'tag'
-        self.tagging_menu_window.par.winclose.pulse()
-        self.my.op('list/list_callbacks').module.clearActiveStrategy()
-        self.lister.reset()
-
-    def HandleStrategySwitch(self, oper: OP) -> None:
-        """Switch a COMP between TOX and TDN strategies."""
-        tox_tag = self.my.par.Toxtag.val
-        tdn_tag = self.my.par.Tdntag.val
-
-        if tox_tag in oper.tags:
-            self.applyTagToOperator(oper, tdn_tag)
-        elif tdn_tag in oper.tags:
-            self.applyTagToOperator(oper, tox_tag)
-
-        self.ExternalizeImmediate(oper)
-        self.Refresh()
-
-    def HandleStrategySave(self, oper: OP) -> None:
-        """Save the current strategy for a COMP."""
-        tox_tag = self.my.par.Toxtag.val
-        tdn_tag = self.my.par.Tdntag.val
-
-        if tox_tag in oper.tags:
-            self.Save(oper.path)
-        elif tdn_tag in oper.tags:
-            self.SaveTDN(oper.path)
-        else:
-            # Fallback: check externalizations table for untagged COMPs (e.g. root)
-            strategy = self._getCompStrategy(oper)
-            if strategy == 'tox':
-                self.Save(oper.path)
-            elif strategy == 'tdn':
-                self.SaveTDN(oper.path)
-
-        self.Refresh()
-
-    def HandleReload(self, oper: OP) -> None:
-        """Reload a COMP from its external tdn/tox file on disk."""
-        tox_tag = self.my.par.Toxtag.val
-        tdn_tag = self.my.par.Tdntag.val
-
-        # Determine strategy from tags, falling back to table for untagged COMPs
-        if tdn_tag in oper.tags:
-            strategy = 'tdn'
-        elif tox_tag in oper.tags:
-            strategy = 'tox'
-        else:
-            strategy = self._getCompStrategy(oper) or 'tox'
-
-        result = ui.messageBox(
-            'Reload',
-            f'Reload this {strategy.upper()} from disk?\n\n'
-            'This will discard any unsaved in-memory changes\n'
-            'and replace the contents with the file on disk.\n\n'
-            'Operator: ' + oper.path,
-            buttons=['Cancel', 'Reload'])
-
-        if result != 1:
-            return
-
-        if strategy == 'tdn':
-            self._reloadTDN(oper)
-        else:
-            self._reloadTox(oper)
-
-        self.Refresh()
-
-    def _reloadTDN(self, oper: OP) -> None:
-        """Reload a single TDN-strategy COMP from its .tdn file on disk."""
-        rel_tdn_path = self._getStrategyFilePath(oper.path, 'tdn')
-        if not rel_tdn_path:
-            self.Log(f'No TDN file path found for {oper.path}', 'ERROR')
-            return
-
-        abs_path = self.buildAbsolutePath(rel_tdn_path)
-        if not abs_path.is_file():
-            self.Log(f'TDN file not found: {rel_tdn_path}', 'ERROR')
-            return
-
-        try:
-            import json
-            tdn_doc = json.loads(abs_path.read_text(encoding='utf-8'))
-        except Exception as e:
-            self.Log(f'Failed to read TDN for {oper.path}: {e}', 'ERROR')
-            return
-
-        result = self.my.ext.TDN.ImportNetwork(
-            target_path=oper.path,
-            tdn=tdn_doc,
-            clear_first=True,
-            restore_file_links=True,
-        )
-
-        if result.get('error'):
-            self.Log(f'Reload failed for {oper.path}: {result["error"]}', 'ERROR')
-        else:
-            created = result.get('created_count', 0)
-            restored = result.get('restored_file_links', 0)
-            msg = f'Reloaded {oper.path} from disk ({created} ops'
-            if restored:
-                msg += f', {restored} file links'
-            msg += ')'
-            self.Log(msg, 'SUCCESS')
-
-    def _reloadTox(self, oper: OP) -> None:
-        """Reload a single TOX-strategy COMP from its .tox file on disk."""
-        rel_tox_path = self.getExternalPath(oper)
-        if not rel_tox_path:
-            self.Log(f'No TOX file path found for {oper.path}', 'ERROR')
-            return
-
-        abs_path = self.buildAbsolutePath(rel_tox_path)
-        if not abs_path.is_file():
-            self.Log(f'TOX file not found: {rel_tox_path}', 'ERROR')
-            return
-
-        # Toggle enableexternaltox to force TD to re-read the .tox
-        oper.par.enableexternaltox = False
-        oper.par.enableexternaltox = True
-        self.Log(f'Reloaded {oper.path} from disk ({rel_tox_path})', 'SUCCESS')
-
-    def HandleEmbed(self, oper: OP) -> None:
-        """Toggle per-COMP 'embed DATs' setting and re-export the .tdn."""
-        # Read current effective value
-        per_comp = oper.fetch('embed_dats_in_tdn', None, search=False)
-        if per_comp is not None:
-            effective = per_comp
-        else:
-            effective = self.my.par.Embeddatsintdns.eval()
-
-        # Toggle to explicit opposite
-        new_val = not effective
-        oper.store('embed_dats_in_tdn', new_val)
-
-        # Re-export the .tdn with the new setting
-        rel_tdn_path = self._getStrategyFilePath(oper.path, 'tdn')
-        if rel_tdn_path:
-            abs_path = str(self.buildAbsolutePath(rel_tdn_path))
-            protected = self._getAllTrackedTDNFiles(exclude_path=oper.path)
-            self.my.ext.TDN.ExportNetwork(
-                root_path=oper.path, output_file=abs_path,
-                cleanup_protected=protected)
-
-        state = 'on' if new_val else 'off'
-        self.Log(f"Embed DATs set to {state} for {oper.path}", 'SUCCESS')
-        self.Refresh()
-
-    def HandleEmbedStorage(self, oper: OP) -> None:
-        """Toggle per-COMP 'embed storage' setting and re-export the .tdn."""
-        # Read current effective value
-        per_comp = oper.fetch('embed_storage_in_tdn', None, search=False)
-        if per_comp is not None:
-            effective = per_comp
-        else:
-            effective = self.my.par.Embedstorageintdns.eval()
-
-        # Toggle to explicit opposite
-        new_val = not effective
-        oper.store('embed_storage_in_tdn', new_val)
-
-        # Re-export the .tdn with the new setting
-        rel_tdn_path = self._getStrategyFilePath(oper.path, 'tdn')
-        if rel_tdn_path:
-            abs_path = str(self.buildAbsolutePath(rel_tdn_path))
-            protected = self._getAllTrackedTDNFiles(exclude_path=oper.path)
-            self.my.ext.TDN.ExportNetwork(
-                root_path=oper.path, output_file=abs_path,
-                cleanup_protected=protected)
-
-        state = 'on' if new_val else 'off'
-        self.Log(f"Embed storage set to {state} for {oper.path}", 'SUCCESS')
-        self.Refresh()
-
-    def HandlePortableExport(self, oper: OP) -> None:
-        """Show a file dialog and export a portable .tox for the given COMP."""
-        default_name = f"{oper.name}.tox"
-        start_dir = str(Path(project.folder).parents[0])
-        path = ui.chooseFile(
-            load=False,
-            start=start_dir,
-            fileTypes=['tox'],
-            title='Export portable tox')
-        if path is None:
-            return
-        self.ExportPortableTox(target=oper, save_path=str(path))
-        self.Refresh()
-
-    def HandleStrategyRemove(self, oper: OP) -> None:
-        """Remove externalization from a COMP or DAT with confirmation dialog."""
-        result = ui.messageBox(
-            'Remove',
-            'Remove this externalization?\n\n'
-            'This will delete the external file from disk, clear the\n'
-            "operator's externalization tags, and remove the tracking\n"
-            'entry. This cannot be undone.\n\n'
-            'Operator: ' + oper.path,
-            buttons=['Cancel', 'Remove'])
-
-        if result == 1:
-            self._removeExternalization(oper)
-
-    def _removeExternalization(self, oper: OP) -> None:
-        """Remove externalization from a COMP or DAT (no confirmation dialog).
-
-        Deletes the external file, clears tags/parameters, removes the
-        tracking entry, and resets operator color.
-        """
-        tox_tag = self.my.par.Toxtag.val
-        tdn_tag = self.my.par.Tdntag.val
-
-        if tdn_tag in oper.tags:
-            self.RemoveTDNEntry(oper.path)
-            oper.tags.discard(tdn_tag)
-        elif tox_tag in oper.tags:
-            rel_fp = self.getExternalPath(oper)
-            self.RemoveListerRow(oper.path, rel_fp)
-            oper.tags.discard(tox_tag)
-            oper.par.externaltox = ''
-            oper.par.externaltox.readOnly = False
-        elif oper.family == 'DAT':
-            active_tag = self._getActiveDATTag(oper)
-            if active_tag:
-                rel_fp = self.getExternalPath(oper)
-                self.RemoveListerRow(oper.path, rel_fp)
-                oper.tags.discard(active_tag)
-                oper.par.file = ''
-                oper.par.file.readOnly = False
-        elif self._getStrategyFilePath(oper.path, 'tdn'):
-            # Table-only TDN entry (e.g., Full Project export) -- no tag on operator
-            self.RemoveTDNEntry(oper.path)
-
-        self.resetOpColor(oper)
-        self.Refresh()
-
-    def _dispatchTaggerButton(self, oper: OP, tag: str,
-                              label: str) -> None:
-        """Route a tagger manage-mode button click to the correct handler.
-
-        Determines the action from the button label text:
-        - Labels containing 'Remove' → remove externalization
-        - Labels containing 'Convert to' → convert DAT format
-        - Otherwise → switch COMP strategy (TOX↔TDN)
-
-        Note: The caller (parexec1 in tagger buttons) is responsible for
-        closing the tagger window and deferring if needed (e.g., to let
-        the window close before showing a confirmation dialog).
-        """
-        if 'Remove' in label:
-            self.HandleStrategyRemove(oper)
-        elif 'Convert to' in label:
-            self.HandleDATConvert(oper, tag)
-        else:
-            self.HandleStrategySwitch(oper)
-
-    def HandleDATConvert(self, oper: OP, new_tag: str) -> None:
-        """Convert a DAT's externalization to a different format."""
-        self.applyTagToOperator(oper, new_tag)
-        if new_tag in oper.tags:
-            self.ExternalizeImmediate(oper)
-        self.Refresh()
-
-    def ExternalizeImmediate(self, oper: OP) -> None:
-        """Immediately externalize a single tagged operator.
-
-        If already tracked with the current strategy, re-saves the file.
-        If not yet tracked, initializes tracking + saves via handleAddition().
-        Avoids the full Update() scan of all dirty operators.
-        """
-        tox_tag = self.my.par.Toxtag.val
-        tdn_tag = self.my.par.Tdntag.val
-
-        is_tox = tox_tag in oper.tags
-        is_tdn = tdn_tag in oper.tags
-        is_dat = (not is_tox and not is_tdn
-                  and oper.family == 'DAT'
-                  and any(t in oper.tags for t in self.getTags('DAT')))
-
-        if not is_tox and not is_tdn and not is_dat:
-            return
-
-        # Determine strategy for table lookup
-        if is_tox:
-            strategy = 'tox'
-        elif is_tdn:
-            strategy = 'tdn'
-        else:
-            # DAT strategy is the tag value itself (py, json, xml, etc.)
-            dat_tags = self.getTags('DAT')
-            strategy = next((t for t in dat_tags if t in oper.tags), 'py')
-
-        # Check if already tracked with this strategy
-        table = self.Externalizations
-        for i in range(1, table.numRows):
-            if (table[i, 'path'].val == oper.path
-                    and table[i, 'strategy'].val == strategy):
-                # Already tracked -- just re-save
-                if is_tox:
-                    self.Save(oper.path)
-                elif is_tdn:
-                    self.SaveTDN(oper.path)
-                # DATs use syncfile -- no explicit save needed
-                return
-
-        # Not tracked -- full initialization (creates tracking entry + saves file)
-        self.handleAddition(oper)
 
     # ==========================================================================
     # PROJECT-WIDE EXTERNALIZATION
     # ==========================================================================
 
     def ExternalizeProject(self) -> None:
-        """Externalize all compatible COMPs and DATs in project."""
+        """Externalize all compatible COMPs and DATs in project.
+
+        With par-driven discovery, "externalize" means: set par.externaltox
+        on every compatible COMP (defaults each to {folder}/{name}.tox via
+        handleAddition), and set par.file on every supported DAT type.
+        Every COMP also gets a .tdn sidecar via Phase 2's _writeTdnSidecar.
+        """
         if self._performMode:
             return
         choice = ui.messageBox('Embody -- Externalize Full Project',
             'Add all compatible COMPs and DATs to Embody?\n'
             '(Palette components, clones, and replicants will be ignored)\n\n'
-            '  TOX: Externalize each COMP as a .tox file.\n'
-            '  TDN: Externalize each COMP as a .tdn file.\n\n'
-            'Optionally, also export a single project-wide .tdn\n'
-            'snapshot of your entire network (Ctrl+Shift+E).',
-            buttons=['Cancel', 'TOX', 'TDN', 'TOX + Project TDN',
-                     'TDN + Project TDN'])
+            'Each COMP saves as both .tox and .tdn. Each supported DAT\n'
+            'saves to its file extension. Optionally also export a single\n'
+            'project-wide .tdn snapshot (Ctrl+Shift+E).',
+            buttons=['Cancel', 'Externalize',
+                     'Externalize + Project TDN'])
 
         if choice < 1:
             return
 
-        use_tdn = choice in (2, 4)
-        export_project_tdn = choice in (3, 4)
+        export_project_tdn = choice == 2
 
         # Find system COMPs to exclude
         sys_comps = self.root.findChildren(
@@ -4224,28 +3127,34 @@ class EmbodyExt:
             for desc in sys_comp.findChildren():
                 paths_to_exclude.add(desc.path)
 
-        # Process DATs
+        folder = self.ExternalizationsFolder or ''
+
+        # Process DATs -- assign par.file based on type's default extension
         for oper in self.root.findChildren(type=DAT, parName='file'):
             if self._shouldSkipOp(oper, paths_to_exclude):
                 continue
+            if oper.type not in self.supported_dat_types:
+                continue
+            if oper.par.file.eval():
+                continue  # already externalized
+            ext = self.dat_type_to_extension.get(oper.type, 'py')
+            try:
+                oper.par.file.readOnly = False
+                oper.par.file = f"{folder}/{oper.name}.{ext}" if folder else f"{oper.name}.{ext}"
+            except Exception as e:
+                self.Log(f'Failed to set par.file on {oper.path}: {e}', 'WARNING')
 
-            if oper.type in self.supported_dat_types:
-                tag_value = self._inferDATTagValue(oper)
-                self.applyTagToOperator(oper, tag_value)
-
-        # Process COMPs
-        if use_tdn:
-            comp_tag = self.my.par.Tdntag.val
-            for oper in self.root.findChildren(type=COMP):
-                if self._shouldSkipOp(oper, paths_to_exclude):
-                    continue
-                self.applyTagToOperator(oper, comp_tag)
-        else:
-            comp_tag = self.my.par.Toxtag.val
-            for oper in self.root.findChildren(type=COMP, parName='externaltox'):
-                if self._shouldSkipOp(oper, paths_to_exclude):
-                    continue
-                self.applyTagToOperator(oper, comp_tag)
+        # Process COMPs -- assign par.externaltox so Update picks them up
+        for oper in self.root.findChildren(type=COMP, parName='externaltox'):
+            if self._shouldSkipOp(oper, paths_to_exclude):
+                continue
+            if oper.par.externaltox.eval():
+                continue  # already externalized
+            try:
+                oper.par.externaltox.readOnly = False
+                oper.par.externaltox = f"{folder}/{oper.name}.tox" if folder else f"{oper.name}.tox"
+            except Exception as e:
+                self.Log(f'Failed to set par.externaltox on {oper.path}: {e}', 'WARNING')
 
         self.UpdateHandler()
 
@@ -4282,12 +3191,7 @@ class EmbodyExt:
                 if 'clone' in oper.tags:
                     is_clone = True
                     self.Log(f"Skipping file deletion for clone: {op_path}", "INFO")
-                
-                # Remove tags
-                for tag in self.getTags():
-                    if tag in oper.tags:
-                        oper.tags.remove(tag)
-                
+
                 # Clear parameters
                 if oper.family == 'COMP':
                     oper.par.externaltox = ''
@@ -4296,9 +3200,8 @@ class EmbodyExt:
                     oper.par.syncfile = False
                     oper.par.file = ''
                     oper.par.file.readOnly = False
-                
+
                 oper.cook(force=True)
-                self.resetOpColor(oper)
                 self.param_tracker.removeComp(op_path)
         except Exception as e:
             self.Log(f"Error handling operator '{op_path}'", "ERROR", str(e))
@@ -4374,8 +3277,32 @@ class EmbodyExt:
         return False
 
     def RemoveTDNEntry(self, op_path: str) -> None:
-        """Remove a TDN strategy entry and delete the .tdn file from disk."""
-        self._removeTDNStrategy(op_path)
+        """Remove a TDN-strategy entry and delete the .tdn file from disk.
+
+        Par-driven: clears par.externaltox on the target COMP (which also
+        removes its .tdn sidecar association) and deletes the .tdn file
+        on disk. _scanAndPopulate() on the next Update will remove the
+        row from the in-memory table.
+        """
+        target = op(op_path)
+        if not target:
+            self.Log(f"RemoveTDNEntry: operator not found at {op_path}", "WARNING")
+            return
+        rel_tdn = self._buildTDNRelPath(target)
+        try:
+            tdn_abs = self.buildAbsolutePath(rel_tdn)
+            if tdn_abs.is_file():
+                tdn_abs.unlink()
+                self.Log(f"Removed {rel_tdn}", "SUCCESS")
+        except Exception as e:
+            self.Log(f"Failed to remove {rel_tdn}: {e}", "WARNING")
+        if target.family == 'COMP':
+            try:
+                target.par.externaltox.readOnly = False
+                target.par.externaltox = ''
+                target.par.enableexternaltox = False
+            except Exception as e:
+                self.Log(f"Failed to clear externaltox on {op_path}: {e}", "WARNING")
         self.lister.reset()
 
     # ==========================================================================
@@ -4753,7 +3680,6 @@ class EmbodyExt:
             return []
 
         tdn_paths = {path for path, _ in tdn_comps}
-        dat_tags = set(self.getTags('DAT'))
         result = []
 
         for comp_path, _ in tdn_comps:
@@ -4780,10 +3706,6 @@ class EmbodyExt:
                         break
                     parent_op = parent_op.parent()
                 if inside_nested:
-                    continue
-
-                # Skip DATs that already have an Embody tag
-                if dat.tags & dat_tags:
                     continue
 
                 # Skip DATs with a file parameter already set
@@ -4970,20 +3892,24 @@ class EmbodyExt:
         return 'skip'
 
     def _externalizeDATs(self, dats: list) -> int:
-        """Bulk-externalize a list of DAT operators. Returns success count."""
+        """Bulk-externalize a list of DAT operators. Returns success count.
+
+        Par-driven: sets par.file based on DAT type's default extension and
+        triggers handleAddition to write the file to disk.
+        """
         count = 0
+        folder = self.ExternalizationsFolder or ''
         for dat in dats:
             try:
-                # Infer tag from DAT type
-                tag_par_name = self.dat_type_to_tag.get(dat.type)
-                if not tag_par_name:
+                if dat.type not in self.supported_dat_types:
                     continue
-                tag_value = getattr(self.my.par, tag_par_name).val
-                if not tag_value:
+                if dat.par.file.eval():
                     continue
-
-                self.applyTagToOperator(dat, tag_value)
-                self.ExternalizeImmediate(dat)
+                ext = self.dat_type_to_extension.get(dat.type, 'py')
+                rel = f"{folder}/{dat.name}.{ext}" if folder else f"{dat.name}.{ext}"
+                dat.par.file.readOnly = False
+                dat.par.file = rel
+                self.handleAddition(dat)
                 count += 1
             except Exception as e:
                 self.Log(f'Failed to externalize {dat.path}: {e}', 'WARNING')
@@ -5188,21 +4114,6 @@ class EmbodyExt:
 
         self.Log(f'Created missing COMP shell: {comp_path}', 'INFO')
 
-        # Apply tag and color
-        if strategy == 'tdn':
-            tag = self.my.par.Tdntag.val
-            color = (self.my.par.Tdntagcolorr.eval(),
-                     self.my.par.Tdntagcolorg.eval(),
-                     self.my.par.Tdntagcolorb.eval())
-        else:
-            tag = self.my.par.Toxtag.val
-            color = (self.my.par.Toxtagcolorr.eval(),
-                     self.my.par.Toxtagcolorg.eval(),
-                     self.my.par.Toxtagcolorb.eval())
-        if tag:
-            new_comp.tags.add(tag)
-        new_comp.color = color
-
         # Restore position/color from table metadata
         self._restorePositionFromTable(new_comp, comp_path)
 
@@ -5250,112 +4161,15 @@ class EmbodyExt:
     # ==========================================================================
 
     def ReconcileMetadata(self) -> None:
-        """Re-apply tags, colors, and file parameters from the externalizations table.
+        """Re-apply file parameters and positions from the externalizations table.
 
-        Handles the case where the user tagged operators (writing to the table
-        on disk) but closed TD without saving (Ctrl+S).  The .toe retains the
-        operators but loses their in-memory Embody metadata.  This method reads
-        the table and re-applies any missing metadata so the session stays in
-        sync with the on-disk source of truth.
+        With par-driven discovery the table is *derived from* par state via
+        _scanAndPopulate(), so reconciling pars back from the table is mostly
+        circular. This is retained as a no-op for now -- positions can still
+        be restored from the table by RestoreTOXComps and ReconstructTDNComps
+        when they create missing operators.
         """
-        # Skip ONLY when Embody is explicitly Disabled. Same race fix as
-        # Update() -- transient 'Scanning defaults', 'Scanning palette',
-        # and 'Testing' values must NOT block normal operation.
-        if self.my.par.Status == 'Disabled':
-            return
-
-        table = self.Externalizations
-        if not table or table.numRows < 2:
-            return
-
-        tox_tag = self.my.par.Toxtag.val
-        tdn_tag = self.my.par.Tdntag.val
-        embody_path = self.my.path
-        reconciled = 0
-
-        for i in range(1, table.numRows):
-            path = table[i, 'path'].val
-            strategy = table[i, 'strategy'].val if table[0, 'strategy'] is not None else ''
-            rel_file_path = table[i, 'rel_file_path'].val
-            node_color = table[i, 'node_color'].val if table[0, 'node_color'] is not None else ''
-
-            # Skip Embody itself and its descendants
-            if path == embody_path or path.startswith(embody_path + '/'):
-                continue
-
-            oper = op(path)
-            if oper is None:
-                continue  # Missing ops handled by RestoreTOXComps / ReconstructTDNComps
-
-            # Determine expected tag from strategy
-            if strategy == 'tox':
-                tag = tox_tag
-            elif strategy == 'tdn':
-                tag = tdn_tag
-            else:
-                tag = strategy  # DAT strategies are the tag value (py, md, tsv, etc.)
-
-            if not tag:
-                continue
-
-            # Check if already reconciled (idempotency)
-            tag_present = tag in oper.tags
-            if strategy == 'tox':
-                if tag_present and oper.par.externaltox.eval():
-                    continue
-            elif strategy == 'tdn':
-                if tag_present:
-                    continue
-            else:  # DAT
-                if tag_present and oper.par.file.eval():
-                    continue
-
-            # --- Apply metadata ---
-            if strategy not in ('tox', 'tdn'):
-                # DAT reconciliation
-                oper.tags.add(tag)
-                self._setDATLanguageForTag(oper, tag)
-                oper.par.file.readOnly = False
-                oper.par.file = rel_file_path
-                oper.par.syncfile = True
-                oper.par.file.readOnly = True
-
-            elif strategy == 'tox':
-                # TOX COMP reconciliation
-                oper.tags.add(tag)
-                oper.par.externaltox.readOnly = False
-                oper.par.externaltox = rel_file_path
-                oper.par.externaltox.readOnly = True
-                oper.par.enableexternaltox = True
-                oper.par.reloadtoxpulse.pulse()
-                self._restorePositionFromTable(oper, path)
-
-            elif strategy == 'tdn':
-                # TDN COMP reconciliation
-                oper.tags.add(tag)
-                self._restorePositionFromTable(oper, path)
-
-            # Apply color: prefer table value, fall back to tag color
-            color_applied = False
-            if node_color:
-                try:
-                    r, g, b = [float(c) for c in node_color.split(',')]
-                    oper.color = (r, g, b)
-                    color_applied = True
-                except (ValueError, TypeError):
-                    pass
-            if not color_applied:
-                color = self._getTagColor(oper, tag)
-                if color:
-                    oper.color = color
-
-            reconciled += 1
-            self.Log(f"Reconciled '{path}' ({strategy})", "INFO")
-
-        if reconciled:
-            self.Log(f"Reconciled metadata on {reconciled} operator(s)", "SUCCESS")
-        else:
-            self.Log("All operator metadata consistent", "DEBUG")
+        return
 
     # ==========================================================================
     # TOX RESTORATION ON START
@@ -5441,14 +4255,6 @@ class EmbodyExt:
                     new_comp.allowCooking = False
                     run(lambda p=new_comp.path: self._safeAllowCooking(p, True),
                         delayFrames=1)
-
-                # Re-apply Embody tag and color (may not survive .tox load)
-                tox_tag = self.my.par.Toxtag.val
-                if tox_tag and tox_tag not in new_comp.tags:
-                    new_comp.tags.add(tox_tag)
-                new_comp.color = (self.my.par.Toxtagcolorr.eval(),
-                                  self.my.par.Toxtagcolorg.eval(),
-                                  self.my.par.Toxtagcolorb.eval())
 
                 # Restore position from table metadata
                 self._restorePositionFromTable(new_comp, comp_path)
@@ -5602,16 +4408,6 @@ class EmbodyExt:
                     delayFrames=1)
                 run(lambda p=op_path: self._safeSyncFile(p, True),
                     delayFrames=2)
-
-                # Set language/extension for text DATs
-                self._setDATLanguageForTag(new_dat, strategy)
-
-                # Apply tag and color
-                if strategy:
-                    new_dat.tags.add(strategy)
-                new_dat.color = (self.my.par.Dattagcolorr.eval(),
-                                 self.my.par.Dattagcolorg.eval(),
-                                 self.my.par.Dattagcolorb.eval())
 
                 # Restore position from table metadata
                 self._restorePositionFromTable(new_dat, dat_path)
@@ -5819,10 +4615,6 @@ class EmbodyExt:
             self.Refresh()
         elif action == 'close':
             win.par.winclose.pulse()
-
-    def resetOpColor(self, oper: OP) -> None:
-        """Reset operator to default color."""
-        oper.color = (0.55, 0.55, 0.55)
 
     def getProjectFolder(self) -> str:
         """Get project folder path."""

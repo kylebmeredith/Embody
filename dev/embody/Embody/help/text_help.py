@@ -3,10 +3,10 @@ Embody v5
 ===============
 
 Embody provides robust automated externalization for
-TouchDesigner projects. Any COMP or DAT operator(s) in your
-project can be tagged by pressing left control twice in a row
-while selected to automatically externalize it to a version-
-control-friendly file (.tox, .py, .json, etc.).
+TouchDesigner projects. Any COMP or DAT operator can be
+externalized to a version-control-friendly file (.tox, .py,
+.json, .tdn, etc.) by setting its native external-file
+parameter.
 
 Simply drag and drop the Embody .tox from the /release folder
 into your project to get started!
@@ -14,26 +14,22 @@ into your project to get started!
 Getting Started
 ---------------
 1. Add the Embody .tox to your project
-2. Tag operators for externalization (lctrl-lctrl)
+2. Set par.externaltox on COMPs you want to externalize, or
+   par.file on supported DATs (or use "Externalize Full
+   Project" to do it for every compatible op)
 3. Press ctrl-shift-u to initialize/update
 4. Work as normal -- externalized files are the source of truth
 
-The default Tags are listed on the Tags page. These can be
-customized, but please do so before you enable Embody.
-
-To enable (initialize), add your specified Tag(s) to any
-supported OP, set your externalization Folder, and pulse the
-Enable/Update button. Embody will search your entire project
-for tagged operators and externalize them with a folder
-structure mirroring your TouchDesigner network.
-
-You may also externalize all supported OPs in one step via
-the "Externalize Full Project" button.
+Discovery is par-driven: an op is externalized iff
+par.externaltox != '' (COMPs) or par.file != '' (DATs). No
+tags. No persistent tracking table on disk. The in-memory
+Externalizations table is a derived view, rebuilt on every
+Update/Refresh from a live par-driven scan.
 
 Supported Operators
 -------------------
 COMPs:
-- All COMPs except engine, time and annotate
+- All COMPs except engine, time, and annotate
 
 DATs:
 - Text DAT
@@ -48,7 +44,9 @@ DATs:
 
 Supported File Formats
 ----------------------
-COMPs: .tox, .tdn (TDN strategy)
+COMPs: .tox + .tdn sidecar (every externalized COMP writes
+       both -- .tox is canonical, .tdn is the diff-friendly
+       JSON view that TDN tooling can edit and reload)
 DATs:  .py, .json, .xml, .html, .glsl, .frag, .vert,
        .txt, .md, .rtf, .csv, .tsv, .dat
 
@@ -79,8 +77,9 @@ restores everything from the files on disk:
   native file parameter
 
 Your externalized files on disk are the source of truth.
-The .toe file is just a convenient container -- all tagged
-operators are fully recoverable from the external files.
+The .toe file is just a convenient container -- all
+externalized operators are fully recoverable from the
+external files.
 
 All file paths are normalized to forward slashes for cross-
 platform compatibility between Windows and macOS.
@@ -92,12 +91,11 @@ the externalization folder are preserved.
 Export Portable Tox
 -------------------
 Export any COMP as a self-contained .tox file with all
-external file references and Embody tags stripped. The
-exported .tox works when loaded into any TouchDesigner
-project with no missing file errors and no Embody metadata.
+external file references stripped. The exported .tox works
+when loaded into any TouchDesigner project with no missing
+file errors.
 
-Use via the Actions menu in the Manager UI (click a COMP's
-strategy cell, then click "Export portable tox"), or call
+Use via the Actions menu in the Manager UI, or call
 programmatically: op.Embody.ExportPortableTox(target, path)
 
 Non-system absolute paths are warned about but not stripped.
@@ -128,31 +126,19 @@ Embody can export and import TouchDesigner networks as human-
 readable .tdn JSON files. This captures operators, parameters,
 connections, and layout in a diffable format.
 
+Every externalized COMP automatically writes a .tdn sidecar
+alongside its .tox. Edit the .tdn on disk; Embody (or an
+AI agent via MCP) can reload it back into TD with
+import_network.
+
 Use ctrl-shift-e to export the full project, or ctrl-alt-e
 to export just the current network.
-
-Cascade TDN to child COMPs (Tdncascade toggle on TDN page):
-When enabled, tagging a COMP for TDN automatically tags all
-child COMPs too, so each gets its own .tdn file. This keeps
-individual files small and git-friendly instead of producing
-one large monolithic .tdn. Parent files store lightweight
-tdn_ref pointers to each child's .tdn file.
-
-Palette handling (Tdnpalettehandling on TDN page):
-When a TDN export encounters a TD palette COMP (e.g.
-abletonLink, Widget components), Embody decides whether to
-reference it (Black Box) or export its internals (Full
-Export). Ask (default) prompts on first encounter per COMP;
-your choice is remembered per-COMP via comp.store(). The
-four-button dialog also lets you flip the project-wide
-default to Black Box or Full Export for All so you aren't
-re-prompted for subsequent palette COMPs.
 
 Manager UI
 ----------
 Press ctrl-shift-o to open the Manager, a TreeLister of all
 externalized operators and their metadata. From here you can:
-- View dirty state and build info for each operator
+- View dirty state for each operator
 - Navigate to any operator by clicking
 - Open file locations in your system file browser
 - Refresh, filter, and search externalizations
@@ -161,8 +147,6 @@ externalized operators and their metadata. From here you can:
 Keyboard Shortcuts
 ------------------
 ctrl-shift-o :   Open the Manager UI
-lctrl-lctrl :    Tag or manage the operator under the cursor
-                 (shows Actions menu for already-tagged operators)
 ctrl-shift-u :   Update all externalizations
 ctrl-alt-u :     Update only the current COMP you are inside
 ctrl-shift-r :   Refresh tracking state

@@ -171,7 +171,7 @@ def _strategy_style(state):
 	elif state == 'TDN_Exporting':
 		return ('...', _t['tdn_amber'], None)
 	elif state == 'Comp':
-		return ('Tag', _t['comp'], None)
+		return ('', _t['comp'], None)
 	elif state == 'DAT_Saved':
 		return ('', None, None)  # DATs show strategy text in _apply_cell
 	return ('', None, None)
@@ -221,7 +221,7 @@ def _apply_cell(attribs, row, col, data, highlight=False):
 
 		if _active_strategy_row == row and st not in ('DAT_Saved', 'TDN_Exporting', ''):
 			# Menu is open for this row -- show "..." with rollover color
-			attribs.text = '...' if st != 'Comp' else 'Tag'
+			attribs.text = '...' if st != 'Comp' else ''
 			if st in ('TOX_Dirty', 'TDN_Dirty'):
 				attribs.bgColor = _t['dirty_roll']
 			elif st in ('TOX_ParChange', 'TDN_ParChange'):
@@ -372,7 +372,7 @@ def onRollover(comp, row, col, coords, prevRow, prevCol, prevCoords):
 			comp.cellAttribs[row, col].text = '...'
 			comp.cellAttribs[row, col].bgColor = _t['tdn_saved_roll']
 		elif st == 'Comp':
-			comp.cellAttribs[row, col].text = 'Tag'
+			comp.cellAttribs[row, col].text = ''
 			comp.cellAttribs[row, col].bgColor = _t['comp_roll']
 		elif st == 'TDN_Exporting':
 			comp.cellAttribs[row, col].bgColor = _t['tdn_amber_roll']
@@ -472,23 +472,11 @@ def onSelect(comp, startRow, startCol, startCoords,
 		if st == 'TDN_Exporting':
 			return
 
-		if st == 'Comp' and oper:
-			# Unexternalized COMP -- open tagger for strategy choice
-			_active_strategy_row = row
-			parent.Embody.ext.Embody.rolloverOp = oper
-			parent.Embody.op('tagger/switch_family').par.index = 2
-			run(lambda: parent.Embody.ext.Embody.SetupTaggerTagMode(oper), delayFrames=1)
-			run(f"op('{parent.Embody.op('window_tagging_menu')}').par.winopen.pulse()",
-				delayFrames=2)
-		elif (st.startswith('TOX_') or st.startswith('TDN_')) and oper:
-			# Already tagged COMP -- open manage menu with Switch/Save
-			_active_strategy_row = row
-			parent.Embody.ext.Embody.rolloverOp = oper
-			parent.Embody.op('tagger/switch_family').par.index = 2
-			run(lambda s=st: parent.Embody.ext.Embody.SetupTaggerManageMode(oper, s),
-				delayFrames=1)
-			run(f"op('{parent.Embody.op('window_tagging_menu')}').par.winopen.pulse()",
-				delayFrames=2)
+		# Strategy menu (tagger UI) was removed in Phase 5b. The Phase 2.5
+		# contextual action menu will replace this affordance. For now,
+		# clicking the strategy cell is a no-op -- users set par.externaltox
+		# directly or use Externalize Full Project.
+		return
 
 	elif col == COL_DELETE:
 		rel_fp = data[row, 'rel_file_path'].val

@@ -785,15 +785,17 @@ class TDNExt:
 			'INFO')
 
 	def ExportProjectTDNInteractive(self):
-		"""Export project TDN with a dialog if TDN-tagged COMPs exist.
+		"""Export project TDN with a dialog if separately-externalized COMPs exist.
 
 		Shows a ui.messageBox letting the user choose between a full
 		(self-contained) export or a modular export that skips children
-		of TDN-managed COMPs. If no TDN-tagged COMPs exist, exports
-		everything directly without prompting.
+		whose .tdn sidecars are managed separately. If no such COMPs
+		exist, exports everything directly without prompting.
 		"""
-		tdn_tag = self.ownerComp.par.Tdntag.val
-		tdn_comps = root.findChildren(tags=[tdn_tag])
+		# Externalized COMPs each have their own .tox + .tdn sidecar via Phase 2.
+		# Treat them as candidates for modular reference during a parent export.
+		tdn_comps = root.findChildren(type=COMP, parName='externaltox')
+		tdn_comps = [c for c in tdn_comps if c.par.externaltox.eval()]
 		# Exclude Embody + descendants, non-COMPs, and system paths
 		embody_path = self.ownerComp.path + '/'
 		tdn_comps = [c for c in tdn_comps
@@ -4053,14 +4055,22 @@ class TDNExt:
 		return skipped
 
 	def _hasTDNTag(self, target):
-		"""Check if a COMP has its own TDN externalization tag."""
+		"""Check if a COMP is separately externalized (has its own .tdn sidecar).
+
+		Renamed semantics for par-driven discovery: any COMP with
+		par.externaltox set has its own .tox + .tdn sidecar via
+		_writeTdnSidecar, so it should be treated as a reference when
+		encountered as a child during a parent's TDN export.
+		"""
 		if not target.isCOMP:
 			return False
-		tdn_tag = self.ownerComp.par.Tdntag.val
-		return tdn_tag in target.tags
+		try:
+			return bool(target.par.externaltox.eval())
+		except Exception:
+			return False
 
 	def _resolveTDNRef(self, target) -> 'Optional[str]':
-		"""Look up a TDN-tagged child COMP's relative file path.
+		"""Look up an externalized child COMP's relative .tdn file path.
 
 		Returns the child's .tdn file path (relative to the project
 		externalization folder) from the externalizations table, or
@@ -4684,19 +4694,12 @@ class TDNExt:
 	def _warnLargeTDN(self, filepath: str, root_path: str) -> None:
 		"""Show a one-time warning when a TDN file exceeds the size threshold.
 
-		Uses the Tdncascadewarn parameter (ask/quiet) to control whether
-		the dialog is shown. 'Don't show again' sets the parameter to
-		'quiet' permanently.
+		With par-driven discovery, every externalized COMP automatically
+		gets its own .tdn sidecar via _writeTdnSidecar, so child cascade
+		is implicit -- there's no Tdncascade toggle anymore. This warning
+		is retained for the case of a one-shot full-project TDN export.
 		"""
 		LARGE_TDN_THRESHOLD = 5_000_000  # 5 MB
-
-		# Already using cascade -- no point warning
-		if self.ownerComp.par.Tdncascade.eval():
-			return
-
-		warn_pref = getattr(self.ownerComp.par, 'Tdncascadewarn', None)
-		if warn_pref is None or warn_pref.eval() != 'ask':
-			return
 
 		try:
 			file_size = Path(filepath).stat().st_size
@@ -4709,17 +4712,11 @@ class TDNExt:
 		size_mb = file_size / (1024 * 1024)
 		msg = (
 			f'The TDN file for {root_path} is {size_mb:.1f} MB.\n\n'
-			f'Large TDN files are difficult to diff in git. '
-			f'Enable "Cascade to Children" on the TDN page '
-			f'to split each child COMP into its own .tdn file.')
-		choice = self.ownerComp.ext.Embody._messageBox(
-			'Large TDN File',
-			msg,
-			buttons=['OK', "Don't show again"])
-
-		if choice == 1:  # Don't show again
-			self.ownerComp.par.Tdncascadewarn = 'quiet'
-			self._log('Large TDN warning silenced', 'INFO')
+			f'Large TDN files are difficult to diff in git. Consider '
+			f'externalizing internal COMPs separately so each gets its '
+			f'own smaller .tdn sidecar.')
+		self.ownerComp.ext.Embody._messageBox(
+			'Large TDN File', msg, buttons=['OK'])
 
 	def _warnLockedNonDATs(self, root_op, context='export'):
 		"""Scan a network for locked non-DAT operators and warn.

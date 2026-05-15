@@ -20,7 +20,7 @@ def onValueChange(par, prev):
 
 	# use par.eval() to get current value
 	if par.name == 'Folder':
-		parent.Embody.Disable(prev, removeTags=False)
+		parent.Embody.Disable(prev)
 		run(f"op('{parent.Embody}').UpdateHandler()", delayFrames = 60)
 
 	elif par.name == 'Externalizations':
@@ -77,10 +77,6 @@ def onValueChange(par, prev):
 		# No-op when the TDN subsystem is disabled -- nothing to re-export.
 		if parent.Embody.ext.Embody._tdnEnabled():
 			parent.Embody.ext.TDN.ReexportAllTDNs()
-
-	elif par.name == 'Tdncascade':
-		state = 'enabled' if par.eval() else 'disabled'
-		parent.Embody.ext.Embody.Log(f'TDN cascade {state}', 'INFO')
 
 	if par.name in parent.Embody.ext.Embody._PERSISTED_PARAMS:
 		parent.Embody.ext.Embody._deferSaveSettings()

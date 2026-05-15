@@ -941,27 +941,34 @@ class EnvoyMCPServer:
         # === Embody Integration Tools ===
 
         @self.mcp.tool()
-        def externalize_op(op_path: str, tag_type: str = None) -> dict:
+        def externalize_op(op_path: str, rel_path: str = None) -> dict:
             """
-            Tag an operator for Embody externalization and write it to disk.
+            Externalize an operator to disk by setting its native external
+            file parameter and running Update.
+
+            For COMPs, sets par.externaltox = rel_path (or auto-derived
+            {folder}/{name}.tox). Embody writes both .tox and .tdn.
+            For DATs, sets par.file = rel_path (or auto-derived from the
+            DAT type's default extension).
 
             Args:
                 op_path: Path to the operator
-                tag_type: Tag type - "tox" for COMPs, "py"/"txt"/"tsv"/"json" etc for DATs
-                         If None, will auto-detect based on operator type
+                rel_path: Optional relative file path. Auto-derived when omitted.
 
             Returns:
-                Dict with success status and applied tag
+                Dict with success status and resulting file path
             """
             return self._execute_in_td('externalize_op', {
                 'op_path': op_path,
-                'tag_type': tag_type
+                'rel_path': rel_path,
             })
 
         @self.mcp.tool()
-        def remove_externalization_tag(op_path: str) -> dict:
+        def remove_externalization(op_path: str) -> dict:
             """
-            Remove Embody externalization tag from an operator.
+            Remove an operator's externalization by clearing its native
+            external file parameter (par.externaltox for COMPs, par.file
+            for DATs) and running Update so Embody can clean up.
 
             Args:
                 op_path: Path to the operator
@@ -969,7 +976,7 @@ class EnvoyMCPServer:
             Returns:
                 Dict with success status
             """
-            return self._execute_in_td('remove_externalization_tag', {'op_path': op_path})
+            return self._execute_in_td('remove_externalization', {'op_path': op_path})
 
         @self.mcp.tool()
         def get_externalizations() -> dict:
@@ -2115,7 +2122,7 @@ class EnvoyExt:
             'get_module_help': self._get_module_help,
             # Embody integration
             'externalize_op': self._externalize_op,
-            'remove_externalization_tag': self._remove_externalization_tag,
+            'remove_externalization': self._remove_externalization,
             'get_externalizations': self._get_externalizations,
             'save_externalization': self._save_externalization,
             'get_externalization_status': self._get_externalization_status,
@@ -3867,62 +3874,84 @@ class EnvoyExt:
 
     # === Embody Integration ===
 
-    def _externalize_op(self, op_path: str, tag_type: str = None) -> dict:
-        """Tag an operator for Embody externalization and write it to disk"""
+    def _externalize_op(self, op_path: str, rel_path: str = None) -> dict:
+        """Externalize an operator by setting its native external-file par"""
         target = op(op_path)
         if not target:
             return {'error': f'Operator not found: {op_path}'}
 
+        ext_inst = op.Embody.ext.Embody
         try:
-            # Determine tag based on operator type if not specified
-            if not tag_type:
-                if target.family == 'COMP':
-                    tag_type = 'tox'
-                elif target.family == 'DAT':
-                    tag_type = op.Embody.ext.Embody._inferDATTagValue(target)
-                else:
-                    return {'error': f'Cannot externalize {target.family} operators'}
+            folder = ext_inst.ExternalizationsFolder or ''
+            if target.family == 'COMP':
+                value = rel_path or (
+                    f"{folder}/{target.name}.tox" if folder
+                    else f"{target.name}.tox"
+                )
+                try:
+                    target.par.externaltox.readOnly = False
+                except Exception:
+                    pass
+                target.par.externaltox = value
+                file_path = value
+            elif target.family == 'DAT':
+                if target.type not in ext_inst.supported_dat_types:
+                    return {'error': f'Unsupported DAT type: {target.type}'}
+                ext = ext_inst.dat_type_to_extension.get(target.type, 'py')
+                value = rel_path or (
+                    f"{folder}/{target.name}.{ext}" if folder
+                    else f"{target.name}.{ext}"
+                )
+                try:
+                    target.par.file.readOnly = False
+                except Exception:
+                    pass
+                target.par.file = value
+                file_path = value
+            else:
+                return {'error': f'Cannot externalize {target.family} operators'}
 
-            # Apply the tag and run Update to externalize to disk
-            op.Embody.ext.Embody.applyTagToOperator(target, tag_type)
             op.Embody.Update()
 
-            file_path = target.par.file.eval() if target.family == 'DAT' else target.par.externaltox.eval()
             return {
                 'success': True,
                 'path': op_path,
-                'tag': tag_type,
-                'file': file_path
+                'file': file_path,
             }
         except Exception as e:
-            return {'error': f'Failed to tag: {e}'}
+            return {'error': f'Failed to externalize: {e}'}
 
-    def _remove_externalization_tag(self, op_path: str) -> dict:
-        """Remove Embody externalization tag and clean up"""
+    def _remove_externalization(self, op_path: str) -> dict:
+        """Clear an operator's external-file par and run Update to clean up"""
         target = op(op_path)
         if not target:
             return {'error': f'Operator not found: {op_path}'}
 
         try:
-            # Get all tags and remove them
-            tags = op.Embody.ext.Embody.getTags()
-            removed = []
-            for tag in tags:
-                if target.tags and tag in target.tags:
-                    target.tags.remove(tag)
-                    removed.append(tag)
+            cleared = False
+            if target.family == 'COMP':
+                if target.par.externaltox.eval():
+                    target.par.externaltox.readOnly = False
+                    target.par.externaltox = ''
+                    target.par.enableexternaltox = False
+                    cleared = True
+            elif target.family == 'DAT':
+                if target.par.file.eval():
+                    target.par.file.readOnly = False
+                    target.par.file = ''
+                    target.par.syncfile = False
+                    cleared = True
 
-            # Run Update to process the subtraction
-            if removed:
+            if cleared:
                 op.Embody.Update()
 
             return {
                 'success': True,
                 'path': op_path,
-                'removed_tags': removed
+                'cleared': cleared,
             }
         except Exception as e:
-            return {'error': f'Failed to remove tag: {e}'}
+            return {'error': f'Failed to remove externalization: {e}'}
 
     def _get_externalizations(self) -> dict:
         """Get all externalized operators"""

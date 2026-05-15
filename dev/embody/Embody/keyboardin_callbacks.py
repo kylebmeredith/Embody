@@ -30,15 +30,6 @@ def onKey(dat, key, character, alt, lAlt, rAlt, ctrl, lCtrl, rCtrl, shift, lShif
 	if state and key == 'o' and ctrl_or_cmd and lShift:
 		parent.Embody.Manager('open')
 
-	# add tox/dat tag
-	elif state and key == 'lctrl':
-		timer = op('timer1')
-		if timer['running']:
-			run(f"op('{parent.Embody}').TagGetter()", delayFrames=6)
-
-		timer.par.active = 1
-		timer.par.start.pulse()
-
 	# initialize/update externalizations
 	elif state and key == 'u' and ctrl_or_cmd and lShift:
 		parent.Embody.UpdateHandler()
