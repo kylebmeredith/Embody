@@ -4640,11 +4640,60 @@ class EmbodyExt:
             self.Log(f'Action menu: {target.family} not supported', 'WARNING')
             return
 
-        is_externalized = self._isOpExternalized(target)
-        if is_externalized:
+        if self._isOpExternalized(target):
             self._actionMenuExternalized(target)
         else:
             self._actionMenuNotExternalized(target)
+
+    def _popDialog(self, *, text: str, title: str, buttons: list,
+                    callback, esc_button: Optional[int] = None,
+                    enter_button: Optional[int] = None,
+                    text_entry: Optional[str] = None) -> None:
+        """Open a TDResources.PopDialog (Externalize-style).
+
+        Wraps op.TDResources.PopDialog.OpenDefault with sensible defaults
+        and a graceful fallback to ui.messageBox if PopDialog isn't
+        available (e.g. on TD builds without TDResources, in headless test
+        contexts).
+        """
+        # Default escape/enter to last/first button if not specified
+        if esc_button is None:
+            esc_button = len(buttons)  # 1-indexed: last button
+        if enter_button is None:
+            enter_button = 1  # 1-indexed: first non-cancel button
+        try:
+            pop = op.TDResources.op('popDialog') or op.TDResources.PopDialog
+        except Exception:
+            pop = None
+        if pop is None:
+            # Synchronous fallback -- ui.messageBox returns the button index.
+            kwargs = {'title': title, 'buttons': buttons}
+            choice = ui.messageBox(title, text, buttons=buttons)
+            callback({
+                'button': buttons[choice] if 0 <= choice < len(buttons) else buttons[esc_button - 1],
+                'enteredText': text_entry or '',
+            })
+            return
+        kwargs = {
+            'text': text,
+            'title': title,
+            'buttons': buttons,
+            'callback': callback,
+            'escButton': esc_button,
+            'enterButton': enter_button,
+            'escOnClickAway': True,
+        }
+        if text_entry is not None:
+            kwargs['textEntry'] = text_entry
+        try:
+            pop.OpenDefault(**kwargs)
+        except Exception as e:
+            self.Log(f'PopDialog failed, falling back to messageBox: {e}', 'WARNING')
+            choice = ui.messageBox(title, text, buttons=buttons)
+            callback({
+                'button': buttons[choice] if 0 <= choice < len(buttons) else buttons[esc_button - 1],
+                'enteredText': text_entry or '',
+            })
 
     def _resolveActionTarget(self) -> Optional[OP]:
         """Pick the operator to act on from the active pane context."""
@@ -4685,56 +4734,68 @@ class EmbodyExt:
         return False
 
     def _actionMenuExternalized(self, target: OP) -> None:
-        """Menu for an op that is already externalized."""
+        """Async menu for an op that is already externalized."""
         is_comp = (target.family == 'COMP')
         rel = (target.par.externaltox.eval() if is_comp
                else target.par.file.eval())
-        title = f'Embody: {target.name}'
-        msg = f'{target.path}\nexternalized to: {rel}'
-        buttons = ['Cancel', 'Save']
+        buttons = ['Save']
         if is_comp:
             buttons.append('Reload from .tdn')
         buttons.append('More...')
-        choice = ui.messageBox(title, msg, buttons=buttons)
-        if choice <= 0:
-            return
-        if choice == 1:
-            self._saveOpFromMenu(target)
-            return
-        if is_comp and choice == 2:
-            self.ReloadFromTdn(target.path)
-            return
-        # "More..." -- last button
-        self._actionMenuMore(target)
+        buttons.append('Cancel')
+
+        def on_choice(info, t=target):
+            btn = info.get('button')
+            if btn == 'Save':
+                self._saveOpFromMenu(t)
+            elif btn == 'Reload from .tdn':
+                self.ReloadFromTdn(t.path)
+            elif btn == 'More...':
+                self._actionMenuMore(t)
+            # Cancel / unknown -> no-op
+
+        self._popDialog(
+            text=f'{target.path}\nexternalized to: {rel}',
+            title=f'Embody: {target.name}',
+            buttons=buttons,
+            callback=on_choice,
+            esc_button=len(buttons),  # Cancel
+            enter_button=1,           # Save
+        )
 
     def _actionMenuMore(self, target: OP) -> None:
-        """Secondary menu with less-frequent / destructive actions."""
-        buttons = ['Cancel', 'Reveal in file browser',
-                   'Re-externalize', 'Remove externalization']
-        choice = ui.messageBox(
-            f'Embody: {target.name} - more',
-            f'Choose an action for {target.path}.',
-            buttons=buttons)
-        if choice <= 0:
-            return
-        if choice == 1:
-            is_comp = (target.family == 'COMP')
-            rel = (target.par.externaltox.eval() if is_comp
-                   else target.par.file.eval())
-            if rel:
-                self.OpenSaveFile(rel)
-            return
-        if choice == 2:
-            self._reexternalizeViaMenu(target)
-            return
-        if choice == 3:
-            is_comp = (target.family == 'COMP')
-            rel = (target.par.externaltox.eval() if is_comp
-                   else target.par.file.eval())
-            self.RemoveListerRow(target.path, rel, delete_file=True)
+        """Async secondary menu with less-frequent / destructive actions."""
+        buttons = [
+            'Reveal in file browser',
+            'Re-externalize',
+            'Remove externalization',
+            'Cancel',
+        ]
+
+        def on_choice(info, t=target):
+            btn = info.get('button')
+            is_comp = (t.family == 'COMP')
+            rel = (t.par.externaltox.eval() if is_comp
+                   else t.par.file.eval())
+            if btn == 'Reveal in file browser':
+                if rel:
+                    self.OpenSaveFile(rel)
+            elif btn == 'Re-externalize':
+                self._reexternalizeViaMenu(t)
+            elif btn == 'Remove externalization':
+                self.RemoveListerRow(t.path, rel, delete_file=True)
+
+        self._popDialog(
+            text=f'Choose an action for {target.path}.',
+            title=f'Embody: {target.name} - more',
+            buttons=buttons,
+            callback=on_choice,
+            esc_button=len(buttons),  # Cancel
+            enter_button=1,
+        )
 
     def _actionMenuNotExternalized(self, target: OP) -> None:
-        """Menu for an op that is not yet externalized."""
+        """Async menu for an op that is not yet externalized."""
         is_comp = (target.family == 'COMP')
         if not is_comp and target.type not in self.supported_dat_types:
             self.Log(
@@ -4745,20 +4806,27 @@ class EmbodyExt:
         has_default = bool(
             getattr(self.my.par, default_par, None)
             and getattr(self.my.par, default_par).eval())
-        buttons = ['Cancel']
+        buttons = []
         if has_default:
             buttons.append('Externalize (default folder)')
         buttons.append('Externalize (choose folder)...')
-        choice = ui.messageBox(
-            f'Embody: {target.name}',
-            f'Externalize {target.path}?',
-            buttons=buttons)
-        if choice <= 0:
-            return
-        if has_default and choice == 1:
-            self._externalizeViaMenu(target, use_default=True)
-        else:
-            self._externalizeViaMenu(target, use_default=False)
+        buttons.append('Cancel')
+
+        def on_choice(info, t=target):
+            btn = info.get('button')
+            if btn == 'Externalize (default folder)':
+                self._externalizeViaMenu(t, use_default=True)
+            elif btn == 'Externalize (choose folder)...':
+                self._externalizeViaMenu(t, use_default=False)
+
+        self._popDialog(
+            text=f'Externalize {target.path}?',
+            title=f'Embody: {target.name}',
+            buttons=buttons,
+            callback=on_choice,
+            esc_button=len(buttons),  # Cancel
+            enter_button=1,
+        )
 
     def _externalizeViaMenu(self, target: OP, use_default: bool) -> None:
         """Set the external file par and run Update."""

@@ -183,6 +183,30 @@ All paths below are in `C:\Users\Kyle\dev\touch\Externalize\Externalize.py`:
 - `Sync_on_save` (line 291) — Ctrl+S gating pattern. Used in Phase 4.
 - `TDNExt.ExportNetwork` (inside the fork) — already does the TDN sidecar export. Phase 2 just adds a call to it.
 
+## Future phases / roadmap (post Phase 4)
+
+### Phase 6 — Release / unexternalize
+
+Port `C:\Users\Kyle\dev\touch\Externalize\Release.py` into Embody so the same tool that externalizes a COMP can also export a release-ready copy of it. Two flavors:
+
+**Per-COMP release** (extends `ExportPortableTox`):
+- Prompt for new name and version via `TDResources.PopDialog` (Externalize-style two-step dialog: name → version → save folder).
+- On a temporary copy of the target COMP, recursively clear `par.externaltox` / `par.enableexternaltox` on COMPs and `par.file` / `par.syncfile` on DATs (port `Externalize.Release.unexternalizeOperator` — `Release.py:15-26`).
+- Reset all custom params to their `defaultMode` / `default` / `defaultExpr` / `defaultBindExpr`. Skip the `About` page so version/build/timestamp metadata stays.
+- **Before save: set the COMP's current parameter page to its first custom page** so when the user opens the released `.tox` they see the intended page.
+- Save the copy as `{Name}_{Version}.tox` to a user-chosen folder. Destroy the copy.
+- Hook into the action menu as a new option (probably under "More..."): `Release...`.
+
+**Project-wide release** (new):
+- Walk every par-set op in the project, snapshot their external-file pars in memory.
+- Clear `par.externaltox` / `par.file` / `par.syncfile` everywhere.
+- `project.save(chosen_path)` to a fresh `.toe` location.
+- Restore the snapshotted pars so the live session is unaffected (same strip/restore pattern Embody already uses for TDN saves).
+- Surface as a toolbar button + dialog (`Release Project...` → choose path + optional name/version metadata).
+- Reuse the per-COMP page-reset rule for any embedded COMPs that should land on a particular page.
+
+Retire `C:\Users\Kyle\dev\touch\Externalize\Release.py` once both flavors live inside Embody.
+
 ## Risks / open issues
 
 - **Clones / palette-clones**: Embody has special-case logic in `getOpPaths` and `_buildTDNRelPath` for palette-cloned COMPs (`_PALETTE_CLONE_SKIP_PARAMS`). Externalize sidesteps clones entirely by filtering them out. Confirm the fork can also just exclude clones — if a user wants to externalize a clone master, they remove the clone parameter first.
