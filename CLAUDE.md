@@ -8,7 +8,7 @@
 
 ## Critical Rules
 
-1. **Prefer `.tdn` files for reading TDN-externalized COMPs** — `.tdn` files are JSON on disk with complete network structure (operators, parameters, connections, positions, flags, DAT content, annotations). Reading them directly is faster than MCP round-trips. Check `externalizations.tsv` (strategy column) or call `get_externalizations` to identify TDN-strategy COMPs. To edit: modify the `.tdn` file on disk, then **always** call `import_network` via MCP with the COMP path, the parsed JSON, and `clear_first=True` to reload it in TD. **Never leave a `.tdn` edit unreloaded** — the user must see updates immediately in TD. Use MCP when you need live runtime state (evaluated expressions, cook errors) or for non-TDN operators.
+1. **Prefer `.tdn` files for reading TDN-externalized COMPs** — `.tdn` files are JSON on disk with complete network structure (operators, parameters, connections, positions, flags, DAT content, annotations). Reading them directly is faster than MCP round-trips. Call `get_externalizations` (or scan disk for `.tdn` files alongside their `.tox`) to identify which COMPs have a TDN sidecar. To edit: modify the `.tdn` file on disk, then **always** call `import_network` via MCP with the COMP path, the parsed JSON, and `clear_first=True` to reload it in TD. **Never leave a `.tdn` edit unreloaded** — the user must see updates immediately in TD. Use MCP when you need live runtime state (evaluated expressions, cook errors) or for non-TDN operators.
 2. **Use Envoy MCP tools for live TD state and non-TDN operators** — NEVER say "I can't edit that because it's in a .tox" or "these are binary files I can't access." For operators not externalized as TDN, use MCP tools to inspect and modify them. The filesystem holds externalized files (`.py`, `.tox`, `.tdn`, `.json`, `.xml`, etc.); MCP is for interacting with live operator state inside TD.
 3. **NEVER create operators under `/local`** — `/local` is volatile storage, not saved with the `.toe` file. Always place operators under the project root or the user's active network. Use `execute_python` with `result = ui.panes.current.owner.path` to find the current network.
 4. **Do NOT assume network paths** — never guess `/project1`. Use `query_network` on `/` to discover the actual root structure.
@@ -72,7 +72,6 @@ Embody/
 │   ├── .venv/                            # Python virtual environment (auto-created)
 │   ├── Backup/                           # Versioned .toe backups
 │   └── embody/
-│       ├── externalizations.tsv          # Tracking table (managed by Embody)
 │       └── Embody/                       # Main extension source
 │           ├── EmbodyExt.py              # Core externalization engine
 │           ├── EnvoyExt.py               # MCP server extension
@@ -89,7 +88,9 @@ Embody/
 
 ### Externalization Sync (.toe <-> externalized files)
 
-Embody externalizes tagged operators to files under `dev/embody/` — `.py` for DATs, `.tox` for COMPs (TOX strategy), `.tdn` for COMPs (TDN strategy). Edits to externalized files are read by TD on load/sync; changes inside TD are written out on save. Externalized files on disk are the source of truth.
+Discovery is **par-driven**: an op is externalized iff `par.externaltox` is set (COMPs) or `par.file` is set (DATs). No tags, no tracking table on disk. The in-memory `Externalizations` DAT is a derived view, rebuilt by `_scanAndPopulate()` on every `Update()` / `Refresh()` from a live scan.
+
+Externalized files land under the user's chosen folder (`Folder` parameter on the Embody COMP) using a **flat layout**: `{folder}/{op.name}.{ext}`. COMPs get both `.tox` (canonical, restored natively by TD) and `.tdn` (diffable JSON sidecar) on every save. Edits to externalized files are read by TD on load/sync; changes inside TD are written out on save. Externalized files on disk are the source of truth.
 
 ### Automatic Restoration
 
