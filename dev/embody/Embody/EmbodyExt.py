@@ -1852,11 +1852,9 @@ class EmbodyExt:
         except Exception as e:
             self.Log(f'registry rename-detect failed: {e}', 'WARNING')
 
-        # Detect renames/moves BEFORE scanning for additions.
-        # Without this, a renamed op gets added as "new" by the additions
-        # scan, and the subsequent continuity check in Refresh() can't
-        # match the stale entry because the new op is already tracked.
-        self.checkOpsForContinuity(self.ExternalizationsFolder)
+        # Rename/move continuity is handled natively by TD now -- par.externaltox
+        # and par.file follow ops through renames. The post-additions
+        # _scanAndPopulate() at the tail of this method captures the new state.
 
         # Check for parameter changes on TOX-strategy COMPs
         for comp in self.getExternalizedOps(COMP, strategy='tox'):
@@ -1932,6 +1930,10 @@ class EmbodyExt:
         # Handle dirty COMPs (TOX + TDN)
         dirties = self.dirtyHandler(True)
 
+        # Refresh the table view from live par state -- supersedes the
+        # legacy .tsv persistence and inline appendRow / deleteRow calls.
+        self._scanAndPopulate()
+
         # Report results
         self._reportResults(dirties, additions, subtractions)
         if not suppress_refresh:
@@ -1958,15 +1960,18 @@ class EmbodyExt:
         """Refresh Embody state and UI."""
         if self._performMode:
             return
-        self.cleanupAllDuplicateRows()
+        # Rebuild the table view from live par state. Replaces the
+        # cleanupAllDuplicateRows + checkOpsForContinuity pair (both no-ops
+        # now -- _scanAndPopulate handles both concerns by simply rebuilding
+        # the table from scratch on every refresh).
+        self._scanAndPopulate()
         self.updateDirtyStates(self.ExternalizationsFolder)
         self.my.op('list/inject_parents').cook(force=True)
         self.lister.reset()
-        self.checkOpsForContinuity(self.ExternalizationsFolder)
-        
+
         if self.my.par.Detectduplicatepaths:
             self.checkForDuplicates()
-        
+
         self.Debug("Refreshed")
         
         if not me.time.play:
@@ -2179,18 +2184,9 @@ class EmbodyExt:
                 return
             oper.par.enableexternaltox = True
 
-            # Update build info
-            if hasattr(oper.par, 'Build'):
-                new_build = oper.par.Build.val + 1
-                oper.par.Build = new_build
-                self.Externalizations[opPath, 'build'] = str(new_build)
-
-            if hasattr(oper.par, 'Date'):
-                oper.par.Date.val = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-            if hasattr(oper.par, 'Touchbuild'):
-                oper.par.Touchbuild = app.build
-                self.Externalizations[opPath, 'touch_build'] = app.build
+            # Build/Date/Touchbuild auto-injection is disabled (see
+            # setupBuildParameters). When re-enabled behind a setting, the
+            # bump-on-Save logic moves back here.
 
             oper.saveExternalTox()
 
@@ -2250,18 +2246,9 @@ class EmbodyExt:
                     self.Externalizations[opPath, 'rel_file_path'] = rel_path
                     self.Log(f"Updated root TDN path: {rel_path}", "INFO")
 
-            # Update build info
-            if hasattr(oper.par, 'Build'):
-                new_build = oper.par.Build.val + 1
-                oper.par.Build = new_build
-                self.Externalizations[opPath, 'build'] = str(new_build)
-
-            if hasattr(oper.par, 'Date'):
-                oper.par.Date.val = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-            if hasattr(oper.par, 'Touchbuild'):
-                oper.par.Touchbuild = app.build
-                self.Externalizations[opPath, 'touch_build'] = app.build
+            # Build/Date/Touchbuild auto-injection is disabled (see
+            # setupBuildParameters). When re-enabled behind a setting, the
+            # bump-on-SaveTDN logic moves back here.
 
             # Export TDN -- protect .tdn files belonging to OTHER tracked
             # TDN COMPs so the stale-file cleanup doesn't delete them.
@@ -2743,8 +2730,8 @@ class EmbodyExt:
             strategy = ext
             self._setupDatForExternalization(oper, rel_file_path, save_file_path)
 
-        # Add to table
-        self._addToTable(oper, rel_file_path, timestamp, dirty, build_num, touch_build, strategy)
+        # Table mutation is no longer done inline -- the table is rebuilt
+        # from a live par-driven scan via _scanAndPopulate() at end of Update.
         self.Log(f"Added '{oper.path}'", "SUCCESS")
 
     def _handleTDNAddition(self, oper: OP) -> None:
@@ -2957,9 +2944,64 @@ class EmbodyExt:
         self.Externalizations[op_path, 'node_color'] = (
             f'{c[0]:.4f},{c[1]:.4f},{c[2]:.4f}')
 
+    def _scanAndPopulate(self) -> None:
+        """Rebuild the Externalizations table from a live par-driven scan.
+
+        Replaces the legacy externalizations.tsv persistence -- the table is
+        now a pure view of in-TD state, refreshed on demand from
+        par.externaltox / par.file. Build/Date/Touchbuild metadata is left
+        blank (auto-injection is disabled; see setupBuildParameters).
+
+        Also performs a one-time migration off the .tsv: clears par.file
+        on the table so TD stops auto-syncing it to disk, and removes the
+        stale externalizations.tsv file. Both operations are idempotent.
+
+        Safe to call repeatedly. Preserves the header row.
+        """
+        table = self.Externalizations
+        if not table:
+            return
+
+        # One-time migration: stop persisting the table to .tsv.
+        if table.par.file.eval():
+            stale_rel = table.par.file.eval()
+            try:
+                table.par.file = ''
+                table.par.syncfile = False
+            except Exception as e:
+                self.Log(f'Could not clear table.par.file: {e}', 'WARNING')
+            try:
+                stale_abs = self.buildAbsolutePath(stale_rel)
+                if stale_abs.is_file():
+                    stale_abs.unlink()
+                    self.Log(f'Removed legacy {stale_rel}', 'INFO')
+            except Exception as e:
+                self.Log(f'Could not remove legacy tsv: {e}', 'WARNING')
+
+        table.clear(keepFirstRow=True)
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        for oper in self.getOpsByPar(COMP) + self.getOpsByPar(DAT):
+            if oper.family == 'COMP':
+                strategy = 'tox'
+                rel = oper.par.externaltox.eval()
+                dirty = bool(oper.dirty)
+            else:
+                rel = oper.par.file.eval()
+                strategy = rel.rsplit('.', 1)[-1] if '.' in rel else ''
+                dirty = ''
+            self._addToTable(
+                oper, rel, timestamp, dirty,
+                build_num='', touch_build='', strategy=strategy,
+            )
+
     def handleSubtraction(self, oper: OP) -> None:
-        """Process removal of an operator from externalization."""
-        self.Externalizations.deleteRow(oper.path)
+        """Process removal of an operator from externalization.
+
+        Table-state cleanup is no longer done inline -- _scanAndPopulate()
+        at the end of Update() rebuilds the view from live par state. This
+        method now only handles the par-side teardown (clear readOnly so
+        downstream UI / RemoveListerRow can edit par.externaltox / par.file).
+        """
         if oper.family == 'COMP':
             oper.par.externaltox.readOnly = False
         elif oper.family == 'DAT':
@@ -2967,27 +3009,18 @@ class EmbodyExt:
         self.Log(f"Removed '{oper.path}'", "SUCCESS")
 
     def setupBuildParameters(self, oper: COMP, build_page: Any, build_num: int, touch_build: Union[str, int]) -> None:
-        """Setup build tracking parameters on a COMP."""
-        # Build Number
-        build_par = next((p for p in oper.customPars if p.name == 'Build'), None)
-        if not build_par:
-            build_par = build_page.appendInt('Build', label='Build Number')
-            build_par.readOnly = True
-        build_par.val = build_num
-        
-        # Date
-        date_par = next((p for p in oper.customPars if p.name == 'Date'), None)
-        if not date_par:
-            date_par = build_page.appendStr('Date', label='Build Date')
-            date_par.readOnly = True
-        date_par.val = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        
-        # Touch Build
-        touch_par = next((p for p in oper.customPars if p.name == 'Touchbuild'), None)
-        if not touch_par:
-            touch_par = build_page.appendStr('Touchbuild', label='Touch Build')
-            touch_par.readOnly = True
-        touch_par.val = touch_build
+        """Setup build tracking parameters on a COMP.
+
+        Disabled in the fork -- Build/Date/Touchbuild auto-injection on
+        externalized COMPs added noise to user networks. Signature kept
+        intact so existing callers (handleAddition, _handleTDNAddition,
+        _reconstructAboutPage) continue to work.
+
+        TODO: re-enable behind an opt-in setting (e.g. a Toggle on the
+        Embody COMP named "Autoinjectbuildinfo"). For now, the body is
+        a no-op.
+        """
+        return
 
     def _reconstructAboutPage(self, comp: 'COMP', comp_path: str) -> None:
         """Reconstruct Embody's About custom page from externalizations.tsv.
@@ -3023,7 +3056,15 @@ class EmbodyExt:
     # ==========================================================================
 
     def checkOpsForContinuity(self, externalizationsFolder: str) -> None:
-        """Check for renamed, moved, or missing operators and update accordingly."""
+        """Check for renamed, moved, or missing operators and update accordingly.
+
+        DISABLED in the fork: TD natively preserves par.externaltox / par.file
+        across renames and moves, so rebuilding the table from a live
+        par-driven scan via _scanAndPopulate() captures the new state
+        without explicit continuity tracking. Body retained for Phase 5
+        deletion.
+        """
+        return
         self._checkExternalToxPar()
 
         try:
@@ -3172,7 +3213,13 @@ class EmbodyExt:
             self.Log("Error in checkOpsForContinuity", "ERROR", str(e))
 
     def _checkExternalToxPar(self):
-        """Check for COMPs using deprecated fileFolder pattern."""
+        """Check for COMPs using deprecated fileFolder pattern.
+
+        DISABLED in the fork: legacy migration helper, no longer reached
+        now that checkOpsForContinuity is a no-op. Body retained for
+        Phase 5 deletion.
+        """
+        return
         comps_with_filefolder = self.root.findChildren(
             type=COMP,
             key=lambda x: (
@@ -3228,7 +3275,12 @@ class EmbodyExt:
             self.Log(f"Error updating timestamp for {oper.path}", "ERROR", str(e))
 
     def _findMovedOp(self, old_op_path, rel_file_path, externalizationsFolder, processed_ops):
-        """Find if an operator was renamed or moved by checking file paths across all COMPs/DATs."""
+        """Find if an operator was renamed or moved by checking file paths across all COMPs/DATs.
+
+        DISABLED in the fork: par.externaltox / par.file follow ops through
+        renames natively. Body retained for Phase 5 deletion.
+        """
+        return False
         # Search all COMPs for one with matching externaltox
         for potential_op in self.root.findChildren(type=COMP):
             potential_path = self.normalizePath(potential_op.par.externaltox.eval()) if potential_op.par.externaltox else ''
@@ -3795,7 +3847,12 @@ class EmbodyExt:
                     delete_file=delete_files)
 
     def updateMovedOp(self, new_op: OP, old_op_path: str, old_rel_file_path: str, externalizationsFolder: str) -> None:
-        """Update table and files when an operator is renamed."""
+        """Update table and files when an operator is renamed.
+
+        DISABLED in the fork: unreachable now that _findMovedOp returns False.
+        Body retained for Phase 5 deletion.
+        """
+        return
         try:
             # Cleanup duplicates
             for i in range(1, self.Externalizations.numRows):
@@ -3889,7 +3946,13 @@ class EmbodyExt:
     # ==========================================================================
 
     def cleanupAllDuplicateRows(self) -> None:
-        """Remove all duplicate rows in the externalizations table."""
+        """Remove all duplicate rows in the externalizations table.
+
+        DISABLED in the fork: _scanAndPopulate() rebuilds the table from
+        a live par scan so duplicates can't accumulate. Body retained for
+        Phase 5 deletion.
+        """
+        return
         paths = set()
         for i in range(1, self.Externalizations.numRows):
             path = self.Externalizations[i, 'path'].val
@@ -3899,12 +3962,17 @@ class EmbodyExt:
             self.cleanupDuplicateRows(path)
 
     def cleanupDuplicateRows(self, path: str) -> Optional[int]:
-        """Remove duplicate rows for a path, keeping most recent per type.
+        """DISABLED in the fork: see cleanupAllDuplicateRows. Body retained
+        for Phase 5 deletion. Returns None.
+
+        Original docstring follows.
+        Remove duplicate rows for a path, keeping most recent per type.
 
         A COMP can legitimately have both a TOX row and a TDN row -- these are
         different externalization types, not duplicates. Only rows with the
         same path AND same type are true duplicates.
         """
+        return None
         type_groups = {}
 
         for i in range(1, self.Externalizations.numRows):
