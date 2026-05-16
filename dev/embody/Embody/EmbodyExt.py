@@ -5107,20 +5107,23 @@ class EmbodyExt:
         if target.family != 'COMP':
             self.Log('Reload only applies to COMPs', 'WARNING')
             return
-        buttons = ['From .tdn', 'From .tox', 'Cancel']
+        # PopDialog clips button labels past ~6 chars at the typical
+        # dialog width. The body text below carries the meaning -- the
+        # buttons just need to indicate which format.
+        buttons = ['.tdn', '.tox', 'Cancel']
 
         def on_choice(info, t=target):
             btn = info.get('button')
-            if btn == 'From .tdn':
+            if btn == '.tdn':
                 self.ReloadFromTdn(t.path)
-            elif btn == 'From .tox':
+            elif btn == '.tox':
                 self._reloadFromTox(t)
 
         self._popDialog(
-            text=f'Reload {target.path} from disk:\n'
-                 f'  .tdn = JSON sidecar (agent-edited, diff-friendly)\n'
-                 f'  .tox = binary (TD native, faster)',
-            title=f'Embody: reload {target.name}',
+            text=f'Reload {target.path} from disk.\n\n'
+                 f'.tdn = JSON sidecar (agent-edited, diff-friendly)\n'
+                 f'.tox = binary (TD native, faster)',
+            title=f'Embody: Reload {target.name}',
             buttons=buttons,
             callback=on_choice,
             esc_button=len(buttons),
@@ -5150,7 +5153,7 @@ class EmbodyExt:
 
         self._popDialog(
             text='Release name (defaults to the operator name).',
-            title=f'Embody: release {target.name} (1/3)',
+            title=f'Embody: Release {target.name} (1/3)',
             buttons=['OK', 'Cancel'],
             callback=on_choice,
             esc_button=2,
@@ -5196,7 +5199,7 @@ class EmbodyExt:
 
         self._popDialog(
             text=f'Release version for "{new_name}".',
-            title=f'Embody: release {target.name} (2/3)',
+            title=f'Embody: Release {target.name} (2/3)',
             buttons=['OK', 'Cancel'],
             callback=on_choice,
             esc_button=2,
