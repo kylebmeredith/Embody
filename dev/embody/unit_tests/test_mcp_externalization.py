@@ -1,8 +1,13 @@
 """
 Test suite: MCP externalization integration handlers in EnvoyExt.
 
-Tests _externalize_op, _remove_externalization_tag,
+Tests _externalize_op (par-driven, rel_path arg), _remove_externalization
+(renamed from _remove_externalization_tag in Phase 5b),
 _get_externalizations, _get_externalization_status.
+
+The tag-type auto-detection tests from before Phase 5b are gone --
+the API now takes an optional rel_path and infers the file extension
+from dat_type_to_extension. There's no tag system anymore.
 """
 
 runner_mod = op.unit_tests.op('TestRunnerExt').module
@@ -11,145 +16,114 @@ EmbodyTestCase = runner_mod.EmbodyTestCase
 
 class TestMCPExternalization(EmbodyTestCase):
 
-    def setUp(self):
-        super().setUp()
-        self.envoy = self.embody.ext.Envoy
+	def setUp(self):
+		super().setUp()
+		self.envoy = self.embody.ext.Envoy
 
-    def tearDown(self):
-        """Clean up externalizations table rows for sandbox ops."""
-        for i in range(self.embody_ext.Externalizations.numRows - 1, 0, -1):
-            path = self.embody_ext.Externalizations[i, 'path'].val
-            if path.startswith(self.sandbox.path):
-                self.embody_ext.Externalizations.deleteRow(i)
-        super().tearDown()
+	def tearDown(self):
+		"""Clear par.externaltox / par.file on sandbox ops + drop their
+		rows from the table."""
+		for child in self.sandbox.findChildren():
+			try:
+				if child.family == 'COMP' and child.par.externaltox.eval():
+					child.par.externaltox.readOnly = False
+					child.par.externaltox = ''
+				elif child.family == 'DAT' and child.par.file.eval():
+					child.par.file.readOnly = False
+					child.par.file = ''
+					child.par.syncfile = False
+			except Exception:
+				pass
+		for i in range(self.embody_ext.Externalizations.numRows - 1, 0, -1):
+			path = self.embody_ext.Externalizations[i, 'path'].val
+			if path.startswith(self.sandbox.path):
+				self.embody_ext.Externalizations.deleteRow(i)
+		super().tearDown()
 
-    # --- _get_externalizations ---
+	# --- _get_externalizations ---
 
-    def test_get_externalizations_returns_list(self):
-        result = self.envoy._get_externalizations()
-        self.assertDictHasKey(result, 'externalizations')
-        self.assertIsInstance(result['externalizations'], list)
+	def test_get_externalizations_returns_list(self):
+		result = self.envoy._get_externalizations()
+		self.assertDictHasKey(result, 'externalizations')
+		self.assertIsInstance(result['externalizations'], list)
 
-    def test_get_externalizations_has_entries(self):
-        result = self.envoy._get_externalizations()
-        self.assertGreater(len(result['externalizations']), 0)
+	def test_get_externalizations_has_entries(self):
+		result = self.envoy._get_externalizations()
+		self.assertGreater(len(result['externalizations']), 0)
 
-    def test_get_externalizations_entry_structure(self):
-        result = self.envoy._get_externalizations()
-        if result['externalizations']:
-            entry = result['externalizations'][0]
-            self.assertDictHasKey(entry, 'path')
-            self.assertDictHasKey(entry, 'type')
+	def test_get_externalizations_entry_structure(self):
+		result = self.envoy._get_externalizations()
+		if result['externalizations']:
+			entry = result['externalizations'][0]
+			self.assertDictHasKey(entry, 'path')
+			self.assertDictHasKey(entry, 'type')
 
-    # --- _get_externalization_status ---
+	# --- _get_externalization_status ---
 
-    def test_get_externalization_status_existing(self):
-        # Use Embody itself as a known externalized op
-        result = self.envoy._get_externalization_status(
-            op_path=self.embody.path)
-        # Should return some status info
-        self.assertNotIn('error', result)
+	def test_get_externalization_status_nonexistent(self):
+		result = self.envoy._get_externalization_status(
+			op_path='/nonexistent')
+		self.assertDictHasKey(result, 'error')
 
-    def test_get_externalization_status_nonexistent(self):
-        result = self.envoy._get_externalization_status(
-            op_path='/nonexistent')
-        self.assertDictHasKey(result, 'error')
+	# --- _externalize_op ---
 
-    # --- _externalize_op ---
+	def test_externalize_op_comp_default_path(self):
+		"""COMP: no rel_path -> auto-derived {folder}/{name}.tox."""
+		comp = self.sandbox.create(baseCOMP, 'mcp_ext_comp')
+		result = self.envoy._externalize_op(op_path=comp.path)
+		self.assertTrue(result.get('success'))
+		self.assertEndsWith(result['file'], 'mcp_ext_comp.tox')
 
-    def test_externalize_op_comp(self):
-        comp = self.sandbox.create(baseCOMP, 'tag_ext_comp')
-        result = self.envoy._externalize_op(op_path=comp.path)
-        self.assertTrue(result.get('success'))
+	def test_externalize_op_comp_explicit_path(self):
+		"""COMP: explicit rel_path is honored."""
+		comp = self.sandbox.create(baseCOMP, 'mcp_ext_explicit')
+		result = self.envoy._externalize_op(
+			op_path=comp.path, rel_path='custom/place.tox')
+		self.assertTrue(result.get('success'))
+		self.assertEqual(result['file'], 'custom/place.tox')
 
-    def test_externalize_op_nonexistent(self):
-        result = self.envoy._externalize_op(
-            op_path='/nonexistent')
-        self.assertDictHasKey(result, 'error')
+	def test_externalize_op_textdat_default_extension(self):
+		"""textDAT: extension derived from dat_type_to_extension (py)."""
+		dat = self.sandbox.create(textDAT, 'mcp_ext_dat')
+		result = self.envoy._externalize_op(op_path=dat.path)
+		self.assertTrue(result.get('success'))
+		self.assertEndsWith(result['file'], 'mcp_ext_dat.py')
 
-    # --- _remove_externalization_tag ---
+	def test_externalize_op_tabledat_default_extension(self):
+		"""tableDAT: extension is .tsv per dat_type_to_extension."""
+		dat = self.sandbox.create(tableDAT, 'mcp_ext_table')
+		result = self.envoy._externalize_op(op_path=dat.path)
+		self.assertTrue(result.get('success'))
+		self.assertEndsWith(result['file'], 'mcp_ext_table.tsv')
 
-    def test_remove_externalization_tag(self):
-        comp = self.sandbox.create(baseCOMP, 'untag_comp')
-        # Tag it first
-        self.envoy._externalize_op(op_path=comp.path)
-        # Now remove
-        result = self.envoy._remove_externalization_tag(op_path=comp.path)
-        self.assertTrue(result.get('success'))
+	def test_externalize_op_unsupported_dat_type_errors(self):
+		"""DAT type not in supported_dat_types -> error."""
+		dat = self.sandbox.create(infoDAT, 'mcp_ext_info')
+		result = self.envoy._externalize_op(op_path=dat.path)
+		self.assertDictHasKey(result, 'error')
 
-    def test_remove_externalization_tag_nonexistent(self):
-        result = self.envoy._remove_externalization_tag(
-            op_path='/nonexistent')
-        self.assertDictHasKey(result, 'error')
+	def test_externalize_op_nonexistent(self):
+		result = self.envoy._externalize_op(op_path='/nonexistent')
+		self.assertDictHasKey(result, 'error')
 
-    # --- DAT auto-detection ---
+	# --- _remove_externalization ---
 
-    def test_tag_textdat_defaults_to_py(self):
-        """textDAT with default language should auto-tag as py."""
-        dat = self.sandbox.create(textDAT, 'auto_py')
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Pytag.eval())
+	def test_remove_externalization_clears_comp_par(self):
+		comp = self.sandbox.create(baseCOMP, 'rm_ext_comp')
+		self.envoy._externalize_op(op_path=comp.path)
+		self.assertTrue(bool(comp.par.externaltox.eval()))
+		result = self.envoy._remove_externalization(op_path=comp.path)
+		self.assertTrue(result.get('success'))
+		self.assertFalse(bool(comp.par.externaltox.eval()))
 
-    def test_tag_textdat_python_language(self):
-        """textDAT with language=python should tag as py."""
-        dat = self.sandbox.create(textDAT, 'lang_py')
-        dat.par.language = 'python'
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Pytag.eval())
+	def test_remove_externalization_clears_dat_par(self):
+		dat = self.sandbox.create(textDAT, 'rm_ext_dat')
+		self.envoy._externalize_op(op_path=dat.path)
+		self.assertTrue(bool(dat.par.file.eval()))
+		result = self.envoy._remove_externalization(op_path=dat.path)
+		self.assertTrue(result.get('success'))
+		self.assertFalse(bool(dat.par.file.eval()))
 
-    def test_tag_textdat_glsl_language(self):
-        """textDAT with language=glsl should tag as glsl."""
-        dat = self.sandbox.create(textDAT, 'lang_glsl')
-        dat.par.language = 'glsl'
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Glsltag.eval())
-
-    def test_tag_textdat_json_language(self):
-        """textDAT with language=json should tag as json."""
-        dat = self.sandbox.create(textDAT, 'lang_json')
-        dat.par.language = 'json'
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Jsontag.eval())
-
-    def test_tag_textdat_xml_language(self):
-        """textDAT with language=xml should tag as xml."""
-        dat = self.sandbox.create(textDAT, 'lang_xml')
-        dat.par.language = 'xml'
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Xmltag.eval())
-
-    def test_tag_textdat_plaintext_language_defaults_to_py(self):
-        """textDAT with language='text' (Plain Text) still defaults to py."""
-        dat = self.sandbox.create(textDAT, 'lang_txt')
-        dat.par.language = 'text'
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Pytag.eval())
-
-    def test_tag_tabledat_auto(self):
-        """tableDAT should auto-tag as tsv."""
-        dat = self.sandbox.create(tableDAT, 'auto_tsv')
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Tsvtag.eval())
-
-    def test_tag_executedat_auto(self):
-        """executeDAT should auto-tag as py."""
-        dat = self.sandbox.create(executeDAT, 'auto_exec')
-        result = self.envoy._externalize_op(op_path=dat.path)
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], self.embody.par.Pytag.eval())
-
-    def test_tag_explicit_type_overrides_language(self):
-        """Explicit tag_type should override auto-detection."""
-        dat = self.sandbox.create(textDAT, 'explicit_txt')
-        dat.par.language = 'python'
-        result = self.envoy._externalize_op(
-            op_path=dat.path, tag_type='txt')
-        self.assertTrue(result.get('success'))
-        self.assertEqual(result['tag'], 'txt')
+	def test_remove_externalization_nonexistent(self):
+		result = self.envoy._remove_externalization(op_path='/nonexistent')
+		self.assertDictHasKey(result, 'error')

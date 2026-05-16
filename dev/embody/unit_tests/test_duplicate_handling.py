@@ -1,8 +1,10 @@
 ﻿"""
 Test suite: Duplicate path handling in EmbodyExt.
 
-Tests cleanupDuplicateRows, cleanupAllDuplicateRows, checkForDuplicates,
-_buildPathGroups, and the clone-resolution helpers.
+Tests checkForDuplicates, _buildPathGroups, and the clone-resolution
+helpers. cleanupDuplicateRows / cleanupAllDuplicateRows were removed
+in Phase 5a (table is rebuilt from a live par scan, so duplicates
+can't accumulate); their tests are gone with them.
 """
 
 runner_mod = op.unit_tests.op('TestRunnerExt').module
@@ -10,42 +12,6 @@ EmbodyTestCase = runner_mod.EmbodyTestCase
 
 
 class TestDuplicateHandling(EmbodyTestCase):
-
-    # --- cleanupAllDuplicateRows ---
-
-    def test_cleanupAllDuplicateRows_runs_without_error(self):
-        # Should not raise on the current externalizations table
-        self.embody_ext.cleanupAllDuplicateRows()
-
-    # --- cleanupDuplicateRows ---
-
-    def test_cleanupDuplicateRows_nonexistent_path_returns_none(self):
-        result = self.embody_ext.cleanupDuplicateRows('/nonexistent/path')
-        # When path is not found, should return None or 0
-        if result is not None:
-            self.assertEqual(result, 0)
-
-    def test_cleanupDuplicateRows_existing_path_no_duplicates(self):
-        # Get any existing externalized op path
-        table = self.embody_ext.Externalizations
-        if not table or table.numRows <= 1:
-            self.skip('No externalizations to check')
-        existing_path = table[1, 'path'].val
-        result = self.embody_ext.cleanupDuplicateRows(existing_path)
-        # Should return 0 (no duplicates to clean) or None
-        if result is not None:
-            self.assertGreaterEqual(result, 0)
-
-    # --- Table integrity after cleanup ---
-
-    def test_cleanup_preserves_table_row_count(self):
-        table = self.embody_ext.Externalizations
-        if not table:
-            self.skip('No externalizations table')
-        initial_rows = table.numRows
-        self.embody_ext.cleanupAllDuplicateRows()
-        # Row count should be same or less (never more)
-        self.assertLessEqual(table.numRows, initial_rows)
 
     # --- _buildPathGroups ---
 
@@ -144,12 +110,10 @@ class TestDuplicateHandling(EmbodyTestCase):
         clone = self.sandbox.create(baseCOMP, 'bpg_clone')
         clone.par.clone = master
         clone.par.enablecloning = True
-        py_tag = self.embody.par.Pytag.val
+        # Par-driven externalization: just set par.file.
         master_dat = master.create(textDAT, 'ext')
-        master_dat.tags.add(py_tag)
         master_dat.par.file = 'test/bpg_shared.py'
         clone_dat = clone.create(textDAT, 'ext')
-        clone_dat.tags.add(py_tag)
         clone_dat.par.file = 'test/bpg_shared.py'
         groups = self.embody_ext._buildPathGroups()
         # Clone DAT should be excluded by isInsideClone
@@ -186,8 +150,7 @@ class TestReplicantHandling(EmbodyTestCase):
         # Create a replicator with a tagged master
         host = self.sandbox.create(baseCOMP, 'rep_host')
         master = host.create(baseCOMP, 'rep_master')
-        tox_tag = self.embody.par.Toxtag.val
-        master.tags.add(tox_tag)
+        # Par-driven externalization: just set par.externaltox.
         master.par.externaltox = 'test/replicated.tox'
         # Drive the replicator with a table
         table = host.create(tableDAT, 'rep_table')
@@ -238,12 +201,14 @@ class TestCheckForDuplicates(EmbodyTestCase):
         super().tearDown()
 
     def _make_tagged_dats(self, names, shared_path='test/shared.py'):
-        """Create multiple tagged DATs pointing to the same file."""
-        py_tag = self.embody.par.Pytag.val
+        """Create multiple externalized DATs pointing to the same file.
+
+        (Method name preserved for git-blame clarity; we no longer add
+        Embody tags -- par.file is the discovery signal.)
+        """
         dats = []
         for name in names:
             dat = self.workspace.create(textDAT, name)
-            dat.tags.add(py_tag)
             dat.par.file = shared_path
             dat.par.syncfile = True
             dats.append(dat)
@@ -332,12 +297,10 @@ class TestBatchResolution(EmbodyTestCase):
         super().tearDown()
 
     def _make_group(self, names, shared_path):
-        """Create a duplicate group of tagged DATs sharing one path."""
-        py_tag = self.embody.par.Pytag.val
+        """Create a duplicate group of externalized DATs sharing one path."""
         dats = []
         for name in names:
             dat = self.workspace.create(textDAT, name)
-            dat.tags.add(py_tag)
             dat.par.file = shared_path
             dat.par.syncfile = True
             dats.append(dat)

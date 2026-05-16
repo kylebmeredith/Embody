@@ -1,8 +1,12 @@
 """
 Test suite: Update and sync cycle in EmbodyExt.
 
-Tests normalizeAllPaths, checkOpsForContinuity, createExternalizationsTable.
-Note: We don't test the full Update() cycle as it modifies files on disk.
+Tests normalizeAllPaths, createExternalizationsTable, and the
+Externalizations table's structural integrity. The continuity scan
+(checkOpsForContinuity) was removed in Phase 5a -- TD natively
+preserves par.externaltox across renames, so there's nothing to
+test there. Full Update() isn't tested directly since it modifies
+files on disk.
 """
 
 runner_mod = op.unit_tests.op('TestRunnerExt').module

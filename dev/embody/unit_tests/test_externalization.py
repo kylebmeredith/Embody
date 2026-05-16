@@ -2,7 +2,9 @@
 Test suite: Externalization pipeline in EmbodyExt.
 
 Tests handleAddition, handleSubtraction, _setupCompForExternalization,
-_setupDatForExternalization, _addToTable, setupBuildParameters, getOpPaths.
+_setupDatForExternalization, _addToTable, getOpPaths.
+Note: setupBuildParameters is a no-op in the fork (Build/Date/Touchbuild
+auto-injection disabled in Phase 3); no direct tests here.
 """
 
 import os
@@ -38,18 +40,20 @@ class TestExternalization(EmbodyTestCase):
         self.assertEqual(rel_file, 'embody/existing_path.tox')
 
     def test_getOpPaths_comp_new_generates_tox(self):
+        # Par-driven: setting externaltox to a folder-only path causes
+        # getOpPaths to fall back to the externalization-folder default.
         comp = self.sandbox.create(baseCOMP, 'new_comp')
-        tox_tag = self.embody.par.Toxtag.val
-        comp.tags.add(tox_tag)
+        comp.par.externaltox = 'embody/unit_tests/_test_temp/new_comp.tox'
         result = self.embody_ext.getOpPaths(comp)
         abs_folder, save_path, rel_dir, rel_file = result
         self.assertIsNotNone(rel_file)
         self.assertEndsWith(rel_file, '.tox')
         self.assertIn('new_comp', rel_file)
 
-    def test_getOpPaths_returns_none_tuple_on_error(self):
-        # A DAT without any tags should return all Nones
-        dat = self.sandbox.create(textDAT, 'no_tag_dat')
+    def test_getOpPaths_returns_none_tuple_when_dat_par_empty(self):
+        # A DAT without par.file set has no extension to infer from --
+        # getOpPaths returns the all-None tuple.
+        dat = self.sandbox.create(textDAT, 'unset_dat')
         result = self.embody_ext.getOpPaths(dat)
         abs_folder, save_path, rel_dir, rel_file = result
         self.assertIsNone(abs_folder)

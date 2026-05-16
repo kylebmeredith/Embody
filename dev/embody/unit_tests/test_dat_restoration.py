@@ -101,36 +101,12 @@ class TestDATRestoration(EmbodyTestCase):
         self.assertIsNotNone(restored, 'tableDAT should be restored')
         self.assertEqual(restored.type, 'table')
 
-    def test_restore_applies_tag(self):
-        """Restored DAT should have the strategy value as a tag."""
-        dat_path = self._root_sandbox.path + '/tagged_dat'
-        rel_path = 'embody/unit_tests/_test_temp/tagged_dat.py'
-        self._create_file(rel_path)
-        self._add_table_entry(dat_path, 'text', 'py', rel_path)
-
-        self.embody_ext.RestoreDATs()
-
-        restored = op(dat_path)
-        self.assertIsNotNone(restored, 'DAT should be restored for tag check')
-        self.assertIn('py', restored.tags)
-
-    def test_restore_applies_color(self):
-        """Restored DAT should have the DAT tag color."""
-        dat_path = self._root_sandbox.path + '/colored_dat'
-        rel_path = 'embody/unit_tests/_test_temp/colored_dat.py'
-        self._create_file(rel_path)
-        self._add_table_entry(dat_path, 'text', 'py', rel_path)
-
-        self.embody_ext.RestoreDATs()
-
-        restored = op(dat_path)
-        self.assertIsNotNone(restored, 'DAT should be restored for color check')
-        expected_r = self.embody.par.Dattagcolorr.eval()
-        expected_g = self.embody.par.Dattagcolorg.eval()
-        expected_b = self.embody.par.Dattagcolorb.eval()
-        self.assertApproxEqual(restored.color[0], expected_r)
-        self.assertApproxEqual(restored.color[1], expected_g)
-        self.assertApproxEqual(restored.color[2], expected_b)
+    # Phase 5b removed RestoreDATs's tag/color reapply step -- restored
+    # DATs no longer get an Embody tag added or their color tinted. Both
+    # tests below would assert on behavior that doesn't exist anymore;
+    # left here as a marker for the missing coverage. If a future phase
+    # re-introduces visual indicators for externalized DATs, restore the
+    # assertions then.
 
     # =================================================================
     # RestoreDATs — skip conditions
@@ -231,42 +207,10 @@ class TestDATRestoration(EmbodyTestCase):
     # =================================================================
     # Continuity check hardening
     # =================================================================
-
-    def test_continuity_protects_recoverable_dat(self):
-        """Missing DAT with file on disk should NOT be removed from table."""
-        dat_path = self._root_sandbox.path + '/recoverable_dat'
-        rel_path = 'embody/unit_tests/_test_temp/recoverable_dat.py'
-        self._create_file(rel_path)
-        self._add_table_entry(dat_path, 'text', 'py', rel_path)
-
-        self.embody_ext.checkOpsForContinuity(
-            self.embody_ext.ExternalizationsFolder)
-
-        self.assertTrue(self._table_has_path(dat_path),
-                        'Recoverable DAT entry should be preserved')
-
-    def test_continuity_removes_unrecoverable_entry(self):
-        """Missing DAT with NO file on disk should be removed from table."""
-        dat_path = self._root_sandbox.path + '/unrecoverable_dat'
-        rel_path = 'embody/unit_tests/_test_temp/unrecoverable_dat.py'
-        # Do NOT create the file
-        self._add_table_entry(dat_path, 'text', 'py', rel_path)
-
-        self.embody_ext.checkOpsForContinuity(
-            self.embody_ext.ExternalizationsFolder)
-
-        self.assertFalse(self._table_has_path(dat_path),
-                         'Unrecoverable entry should be removed')
-
-    def test_continuity_protects_recoverable_tox(self):
-        """Missing TOX COMP with .tox file on disk should NOT be removed."""
-        comp_path = self._root_sandbox.path + '/recoverable_tox'
-        rel_path = 'embody/unit_tests/_test_temp/recoverable_tox.tox'
-        self._create_file(rel_path, content='dummy tox')
-        self._add_table_entry(comp_path, 'container', 'tox', rel_path)
-
-        self.embody_ext.checkOpsForContinuity(
-            self.embody_ext.ExternalizationsFolder)
-
-        self.assertTrue(self._table_has_path(comp_path),
-                        'Recoverable TOX entry should be preserved')
+    #
+    # The continuity machinery was removed in Phase 5a: TD natively
+    # preserves par.externaltox / par.file across renames, and the
+    # externalizations table is now rebuilt from a live par scan via
+    # _scanAndPopulate so stale "recoverable" entries no longer exist
+    # as a category. The three tests that exercised checkOpsForContinuity
+    # were dropped along with that machinery.

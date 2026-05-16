@@ -1,4 +1,4 @@
-﻿"""
+"""
 Test suite: Custom parameter behavior.
 
 Tests the high-value, failure-prone custom parameters on the Embody COMP:
@@ -78,10 +78,15 @@ class TestCustomParameters(EmbodyTestCase):
     def _externalize_project_silent(self, use_tdn=False):
         """Replicate ExternalizeProject() without the ui.messageBox prompt.
 
-        Tags all eligible COMPs and DATs, then calls UpdateHandler + Update.
+        Sets par.externaltox / par.file on every eligible op (par-driven
+        discovery; tags are gone in the fork), then Update().
+
+        `use_tdn` is retained for signature compatibility but ignored --
+        Phase 2 always writes both .tox and .tdn for every COMP.
         """
         ext = self.embody_ext
         root = ext.root
+        folder = ext.ExternalizationsFolder or ''
 
         # Find system COMPs to exclude (palette clones)
         sys_comps = root.findChildren(
@@ -96,27 +101,36 @@ class TestCustomParameters(EmbodyTestCase):
             for desc in sys_comp.findChildren():
                 paths_to_exclude.add(desc.path)
 
-        # Tag eligible DATs
+        # Externalize eligible DATs by setting par.file with the type's default ext
         for oper in root.findChildren(type=DAT, parName='file'):
             if ext._shouldSkipOp(oper, paths_to_exclude):
                 continue
-            if oper.type in ext.supported_dat_types:
-                tag_value = ext._inferDATTagValue(oper)
-                ext.applyTagToOperator(oper, tag_value)
+            if oper.type not in ext.supported_dat_types:
+                continue
+            if oper.par.file.eval():
+                continue
+            ext_str = ext.dat_type_to_extension.get(oper.type, 'py')
+            rel = (f'{folder}/{oper.name}.{ext_str}' if folder
+                   else f'{oper.name}.{ext_str}')
+            try:
+                oper.par.file.readOnly = False
+            except Exception:
+                pass
+            oper.par.file = rel
 
-        # Tag eligible COMPs
-        if use_tdn:
-            comp_tag = ext.my.par.Tdntag.val
-            for oper in root.findChildren(type=COMP):
-                if ext._shouldSkipOp(oper, paths_to_exclude):
-                    continue
-                ext.applyTagToOperator(oper, comp_tag)
-        else:
-            comp_tag = ext.my.par.Toxtag.val
-            for oper in root.findChildren(type=COMP, parName='externaltox'):
-                if ext._shouldSkipOp(oper, paths_to_exclude):
-                    continue
-                ext.applyTagToOperator(oper, comp_tag)
+        # Externalize eligible COMPs by setting par.externaltox
+        for oper in root.findChildren(type=COMP, parName='externaltox'):
+            if ext._shouldSkipOp(oper, paths_to_exclude):
+                continue
+            if oper.par.externaltox.eval():
+                continue
+            rel = (f'{folder}/{oper.name}.tox' if folder
+                   else f'{oper.name}.tox')
+            try:
+                oper.par.externaltox.readOnly = False
+            except Exception:
+                pass
+            oper.par.externaltox = rel
 
         # Run Update to write files and populate table
         ext.UpdateHandler()
@@ -159,55 +173,25 @@ class TestCustomParameters(EmbodyTestCase):
         folder = self.embody_ext.getProjectFolder()
         self.assertTrue(os.path.isdir(folder))
 
-    def test_disable_directly_with_keep_tags(self):
-        """Call Disable(removeTags=False), verify Status=Disabled, tags preserved."""
-        # Get a tagged op before disable
-        tagged_ops = self.embody_ext.getExternalizedOps(COMP)
-        tags_before = {}
-        for oper in tagged_ops[:3]:  # Check up to 3 ops
-            tags_before[oper.path] = set(oper.tags)
+    def test_disable_sets_status_and_clears_pars(self):
+        """Disable() sets Status=Disabled and clears par.externaltox / par.file."""
+        # Phase 5b removed the removeTags kwarg from Disable -- there are
+        # no Embody-defined tags to remove. The remaining contract: clear
+        # the external-file pars on every tracked op and set status.
+        tracked_comps = self.embody_ext.getExternalizedOps(COMP)
+        comp_paths = [c.path for c in tracked_comps[:3]]
 
-        # Disable parexec to prevent callback cascades
         parexec = self.embody.op('parexec')
         parexec.par.active = False
-
         try:
-            self.embody_ext.Disable(removeTags=False)
+            self.embody_ext.Disable()
             self.assertEqual(self.embody.par.Status.eval(), 'Disabled')
 
-            # Tags should be preserved
-            for path, tags in tags_before.items():
+            # par.externaltox should be cleared on tracked ops
+            for path in comp_paths:
                 oper = op(path)
-                if oper:
-                    for t in tags:
-                        self.assertIn(t, oper.tags)
-
-            # Re-enable
-            self.embody_ext.UpdateHandler()
-            self.assertEqual(self.embody.par.Status.eval(), 'Enabled')
-            self.embody_ext.Update()
-        finally:
-            parexec.par.active = True
-
-    def test_disable_directly_with_remove_tags(self):
-        """Call Disable(removeTags=True), verify tags removed, then re-enable and restore."""
-        tags = self.embody_ext.getTags()
-        # Create a test comp in sandbox and tag it
-        test_comp = self.sandbox.create(baseCOMP, 'disable_test')
-        test_comp.tags.add(tags[0])  # Add first tag
-
-        parexec = self.embody.op('parexec')
-        parexec.par.active = False
-
-        try:
-            self.embody_ext.Disable(removeTags=True)
-            self.assertEqual(self.embody.par.Status.eval(), 'Disabled')
-
-            # Tags should be removed from ops
-            # (sandbox comp will be destroyed in tearDown anyway)
-            if test_comp.valid:
-                for t in tags:
-                    self.assertNotIn(t, test_comp.tags)
+                if oper and oper.valid:
+                    self.assertEqual(oper.par.externaltox.eval(), '')
 
             # Re-enable
             self.embody_ext.UpdateHandler()
@@ -244,11 +228,11 @@ class TestCustomParameters(EmbodyTestCase):
         self.assertGreater(tox_count, 0, 'Should have at least one TOX file')
 
     def test_disable_z02_disable_again(self):
-        """Disable with removeTags=True again after TOX restore."""
+        """Disable() again after TOX restore -- idempotent."""
         parexec = self.embody.op('parexec')
         parexec.par.active = False
         try:
-            self.embody_ext.Disable(removeTags=True)
+            self.embody_ext.Disable()
             self.assertEqual(self.embody.par.Status.eval(), 'Disabled')
         finally:
             parexec.par.active = True
@@ -516,7 +500,7 @@ class TestCustomParameters(EmbodyTestCase):
             parexec.par.active = True
 
         # Manually call Disable (same as what parexec.onValueChange does)
-        self.embody_ext.Disable(prev, removeTags=False)
+        self.embody_ext.Disable(prev)
         self.assertEqual(self.embody.par.Status.eval(), 'Disabled')
 
     def test_zz_folder_02_reenable_new(self):
@@ -548,7 +532,7 @@ class TestCustomParameters(EmbodyTestCase):
             parexec.par.active = True
 
         # Disable with the temp folder as "previous"
-        self.embody_ext.Disable(prev, removeTags=False)
+        self.embody_ext.Disable(prev)
         self.assertEqual(self.embody.par.Status.eval(), 'Disabled')
 
     def test_zz_folder_05_reenable_original(self):
@@ -606,7 +590,7 @@ class TestCustomParameters(EmbodyTestCase):
             self.embody.par.Folder.val = target_name
 
             # Disable with the old folder (reproduces the parexec flow)
-            self.embody_ext.Disable(prev, removeTags=False)
+            self.embody_ext.Disable(prev)
             self.assertEqual(self.embody.par.Status.eval(), 'Disabled')
 
             # The target directory must still exist after Disable
@@ -624,7 +608,7 @@ class TestCustomParameters(EmbodyTestCase):
         finally:
             # Restore original folder
             self.embody.par.Folder.val = original_folder
-            self.embody_ext.Disable(target_name, removeTags=False)
+            self.embody_ext.Disable(target_name)
             self.embody_ext.UpdateHandler()
             self.embody_ext.Update()
             parexec.par.active = True
@@ -656,7 +640,7 @@ class TestCustomParameters(EmbodyTestCase):
             canary_dir.mkdir(exist_ok=True)
 
             # Disable with empty prev — this was the trigger for issue #3
-            self.embody_ext.Disable('', removeTags=False)
+            self.embody_ext.Disable('')
             self.assertEqual(self.embody.par.Status.eval(), 'Disabled')
 
             # The canary directory must survive

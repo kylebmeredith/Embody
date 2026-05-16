@@ -1,7 +1,7 @@
 """
 Test suite: Operator query methods in EmbodyExt.
 
-Tests getExternalizedOps, getOpsToExternalize, getOpsByPar.
+Tests getExternalizedOps and getOpsByPar (par-driven discovery).
 """
 
 runner_mod = op.unit_tests.op('TestRunnerExt').module

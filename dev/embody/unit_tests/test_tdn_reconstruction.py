@@ -1,4 +1,4 @@
-﻿"""
+"""
 Test suite: TDN reconstruction — comprehensive round-trip fidelity,
 reconstruction simulation, and resilience testing.
 
@@ -2064,133 +2064,6 @@ class TestTDNReconstruction(EmbodyTestCase):
 
 	# --- P4-P6: checkOpsForContinuity skips TDN children ---
 
-	def test_P04_continuity_check_skips_pure_tdn_children(self):
-		"""checkOpsForContinuity must skip TDN-managed children (no own strategy).
-
-		Operators inside TDN COMPs that don't have their own externalization
-		strategy are purely managed by TDN import/export. The continuity check
-		must skip them to prevent false deletions during the strip/restore
-		save cycle.
-		"""
-		# Create a TDN COMP and a child DAT in the sandbox
-		tdn_comp = self.sandbox.create(baseCOMP, 'tdn_parent')
-		child_dat = tdn_comp.create(textDAT, 'tracked_child')
-		child_dat.text = 'important content'
-
-		tdn_path = tdn_comp.path
-		child_path = child_dat.path
-		tdn_rel = f'embody/{tdn_comp.name}.tdn'
-		child_rel = f'embody/{tdn_comp.name}/tracked_child.txt'
-
-		# Register both — child has EMPTY strategy (purely TDN-managed)
-		self._addTableRow(tdn_path, 'base', 'tdn', tdn_rel)
-		self._addTableRow(child_path, 'text', '', child_rel)
-
-		try:
-			# Destroy the child (simulating StripCompChildren)
-			child_dat.destroy()
-			self.assertIsNone(op(child_path), 'Child should be destroyed')
-
-			# Run the continuity check — this is what caused file deletion
-			self.embody_ext.checkOpsForContinuity(
-				self.embody_ext.ExternalizationsFolder)
-
-			# The child's row must still exist (no own strategy → skipped)
-			self.assertTrue(self._tableHasRow(child_path),
-				'Continuity check must NOT remove pure TDN-managed children')
-		finally:
-			self._removeTableRow(child_path)
-			self._removeTableRow(tdn_path, 'tdn')
-
-	def test_P04b_continuity_detects_deleted_individually_externalized_child(self):
-		"""Individually-externalized children inside TDN COMPs must be checked.
-
-		When a child has its own strategy (py, tsv, etc.), it was explicitly
-		externalized and should go through normal continuity checking —
-		including deletion detection.
-		"""
-		tdn_comp = self.sandbox.create(baseCOMP, 'tdn_with_py_child')
-		child_dat = tdn_comp.create(textDAT, 'my_script')
-
-		tdn_path = tdn_comp.path
-		child_path = child_dat.path
-		tdn_rel = f'embody/{tdn_comp.name}.tdn'
-		child_rel = f'embody/{tdn_comp.name}/my_script.py'
-
-		# Child has its OWN strategy 'py' (individually externalized)
-		self._addTableRow(tdn_path, 'base', 'tdn', tdn_rel)
-		self._addTableRow(child_path, 'text', 'py', child_rel)
-
-		try:
-			# Delete the child
-			child_dat.destroy()
-			self.assertIsNone(op(child_path), 'Child should be destroyed')
-
-			# Run continuity check — should detect the deletion
-			self.embody_ext.checkOpsForContinuity(
-				self.embody_ext.ExternalizationsFolder)
-
-			# Row must be REMOVED (child had its own strategy)
-			self.assertFalse(self._tableHasRow(child_path),
-				'Deleted individually-externalized child must be cleaned up')
-		finally:
-			self._removeTableRow(child_path)
-			self._removeTableRow(tdn_path, 'tdn')
-
-	def test_P05_continuity_check_still_catches_real_missing_ops(self):
-		"""Operators NOT inside TDN COMPs should still be caught as missing."""
-		# Use a top-level fake path that cannot be a child of any TDN-strategy
-		# COMP regardless of what other tests have run. Paths under /embody or
-		# /embody/Embody can become TDN children after z03 runs its TDN
-		# externalization; a root-level path is always safe.
-		orphan_path = '/__test_orphan_dat_continuity_p05'
-		orphan_rel = 'embody/orphan_dat.txt'
-
-		self._addTableRow(orphan_path, 'text', 'txt', orphan_rel)
-
-		try:
-			# The operator doesn't exist at this path
-			self.assertIsNone(op(orphan_path))
-
-			# Run continuity check — should detect it as missing
-			self.embody_ext.checkOpsForContinuity(
-				self.embody_ext.ExternalizationsFolder)
-
-			# The row should be removed (operator is genuinely missing)
-			self.assertFalse(self._tableHasRow(orphan_path),
-				'Genuinely missing operators should still be cleaned up')
-		finally:
-			# Clean up in case the test fails and the row is still there
-			self._removeTableRow(orphan_path)
-
-	def test_P06_nested_pure_tdn_children_also_skipped(self):
-		"""Deeply nested TDN-managed children (no own strategy) should be skipped."""
-		tdn_comp = self.sandbox.create(baseCOMP, 'deep_tdn')
-		inner = tdn_comp.create(baseCOMP, 'inner')
-		deep_dat = inner.create(textDAT, 'deep_tracked')
-
-		tdn_path = tdn_comp.path
-		deep_path = deep_dat.path
-		self._addTableRow(tdn_path, 'base', 'tdn', f'embody/{tdn_comp.name}.tdn')
-		self._addTableRow(deep_path, 'text', '',
-			f'embody/{tdn_comp.name}/inner/deep_tracked.txt')
-
-		try:
-			# Strip everything
-			for c in list(tdn_comp.children):
-				c.destroy()
-
-			self.embody_ext.checkOpsForContinuity(
-				self.embody_ext.ExternalizationsFolder)
-
-			self.assertTrue(self._tableHasRow(deep_path),
-				'Deeply nested pure TDN-managed children must be skipped')
-		finally:
-			self._removeTableRow(deep_path)
-			self._removeTableRow(tdn_path, 'tdn')
-
-	# --- P7-P8: Full strip/restore cycle ---
-
 	def test_P07_strip_restore_preserves_children(self):
 		"""Full strip -> export -> restore cycle preserves all children."""
 		# Build a TDN COMP with content
@@ -2222,61 +2095,6 @@ class TestTDNReconstruction(EmbodyTestCase):
 		self.assertEqual(tdn_comp.op('script1').text, 'preserved content')
 		self.assertIsNotNone(tdn_comp.op('inner/wave1'), 'inner/wave1 not restored')
 
-	def test_P08_strip_restore_then_continuity_check_safe(self):
-		"""Full save cycle: strip -> restore -> continuity check must not delete anything.
-
-		This is the exact sequence that ctrl-s triggers. Tests the complete
-		chain including table entries and the continuity check.
-		Uses empty strategy (pure TDN-managed child) since the TDN child skip
-		only applies to children without their own externalization strategy.
-		"""
-		# Create TDN COMP with a tracked child
-		tdn_comp = self.sandbox.create(baseCOMP, 'full_cycle')
-		child = tdn_comp.create(textDAT, 'tracked_dat')
-		child.text = 'must survive'
-
-		tdn_path = tdn_comp.path
-		child_path = child.path
-
-		# Register in table — empty strategy (TDN-managed child)
-		self._addTableRow(tdn_path, 'base', 'tdn', f'embody/{tdn_comp.name}.tdn')
-		self._addTableRow(child_path, 'text', '',
-			f'embody/{tdn_comp.name}/tracked_dat.txt')
-
-		try:
-			# Phase 1: Export (like Update does)
-			export_result = self.tdn.ExportNetwork(
-				root_path=tdn_path, include_dat_content=True)
-			self.assertTrue(export_result.get('success'))
-			tdn_doc = export_result['tdn']
-
-			# Phase 2: Strip (like onProjectPreSave)
-			self.embody_ext.StripCompChildren(tdn_comp)
-			self.assertEqual(len(tdn_comp.children), 0)
-
-			# Phase 3: Restore (like onProjectPostSave)
-			self.tdn.ImportNetwork(
-				target_path=tdn_path, tdn=tdn_doc,
-				clear_first=True, restore_file_links=True)
-
-			# Phase 4: Continuity check (like the delayed Refresh)
-			self.embody_ext.checkOpsForContinuity(
-				self.embody_ext.ExternalizationsFolder)
-
-			# Verify: table entry must survive
-			self.assertTrue(self._tableHasRow(child_path),
-				'Table entry for TDN child must survive full save cycle')
-
-			# Verify: operator must be restored
-			restored = tdn_comp.op('tracked_dat')
-			self.assertIsNotNone(restored, 'Operator must be restored after save cycle')
-			self.assertEqual(restored.text, 'must survive')
-		finally:
-			self._removeTableRow(child_path)
-			self._removeTableRow(tdn_path, 'tdn')
-
-	# --- P9-P10: Update suppress_refresh and worst-case timing ---
-
 	def test_P09_update_suppress_refresh_no_crash(self):
 		"""Update(suppress_refresh=True) must not crash."""
 		try:
@@ -2284,40 +2102,6 @@ class TestTDNReconstruction(EmbodyTestCase):
 		except Exception as e:
 			self.fail(f'Update(suppress_refresh=True) raised: {e}')
 
-	def test_P10_continuity_check_during_strip_window(self):
-		"""Continuity check DURING strip (before restore) must not delete TDN-managed children.
-
-		This is the worst-case scenario: the refresh fires between
-		strip and restore. The TDN child skip protects children without
-		their own externalization strategy (pure TDN-managed).
-		Individually-externalized children are protected by suppress_refresh.
-		"""
-		tdn_comp = self.sandbox.create(baseCOMP, 'mid_strip')
-		child = tdn_comp.create(textDAT, 'victim')
-		child.text = 'do not delete me'
-
-		tdn_path = tdn_comp.path
-		child_path = child.path
-
-		# Empty strategy = pure TDN-managed child (protected by skip)
-		self._addTableRow(tdn_path, 'base', 'tdn', f'embody/{tdn_comp.name}.tdn')
-		self._addTableRow(child_path, 'text', '',
-			f'embody/{tdn_comp.name}/victim.txt')
-
-		try:
-			# Strip the COMP (children destroyed)
-			self.embody_ext.StripCompChildren(tdn_comp)
-			self.assertIsNone(op(child_path), 'Child must be destroyed by strip')
-
-			# Run continuity check BEFORE restore (the dangerous window)
-			self.embody_ext.checkOpsForContinuity(
-				self.embody_ext.ExternalizationsFolder)
-
-			# The child's table entry MUST survive
-			self.assertTrue(self._tableHasRow(child_path),
-				'Table entry must survive continuity check during strip window')
-		finally:
-			self._removeTableRow(child_path)
 			self._removeTableRow(tdn_path, 'tdn')
 
 	# =================================================================
