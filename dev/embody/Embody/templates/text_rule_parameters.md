@@ -50,6 +50,15 @@ Common patterns:
 | UI | Visual and display options |
 | About | Version, build, author (read-only) |
 
+## Labels
+
+The `label` is the human-readable display string shown in the parameter dialog. Unlike the name (TD-constrained, first-letter-only), labels are free-form and **every word is capitalized** -- including prepositions, conjunctions, and articles:
+
+- Good: `'Sync On Save'`, `'Rebuild All From .tdn'`, `'Filter: Dirty Only'`, `'Default TOX Folder'`
+- Bad: `'Sync on save'`, `'Rebuild all from .tdn'`, `'Filter: dirty only'`
+
+Acronyms and file extensions inside labels stay uppercase (`TOX`, `TDN`, `DATs`, `.tdn`, `MCP`). When a label is set via MCP after the fact, it persists on the COMP in the `.toe` and round-trips through save -- it does not need to be re-set from Python on every load.
+
 ## Naming
 
 - First letter MUST be uppercase, rest lowercase letters and numbers only

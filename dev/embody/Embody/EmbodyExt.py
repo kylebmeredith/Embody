@@ -2382,10 +2382,16 @@ class EmbodyExt:
             # links to anything on disk.
             self._unexternalizeOperator(copy)
 
-            # TODO: set the copy's current parameter page to its first
-            # custom page so the released .tox opens to a useful view.
-            # TD doesn't expose a direct API for this; revisit when the
-            # right mechanism is identified.
+            # Set the released copy's current parameter page to its first
+            # custom page so the released .tox opens to a useful view in
+            # TD's parameter dialog.
+            try:
+                if copy.customPages:
+                    copy.currentPage = copy.customPages[0]
+            except Exception as e:
+                self.Log(
+                    f'Release: could not set current page on {copy.path}: {e}',
+                    'DEBUG')
 
             try:
                 copy.save(save_path)
