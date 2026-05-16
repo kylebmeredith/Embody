@@ -128,6 +128,9 @@ def onPulse(par):
 	elif par.name == 'Rebuildallfromtdn':
 		parent.Embody.ext.Embody.RebuildAllFromTdn()
 
+	elif par.name == 'Releaseproject':
+		parent.Embody.ext.Embody.ReleaseProject()
+
 	return
 
 def onExpressionChange(par, val, prev):

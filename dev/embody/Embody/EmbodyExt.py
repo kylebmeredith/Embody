@@ -2291,6 +2291,287 @@ class EmbodyExt:
 
         return success
 
+    # ==========================================================================
+    # RELEASE (Phase 6)
+    # ==========================================================================
+
+    def Release(self, target: OP, name: Optional[str] = None,
+                 version: Optional[str] = None, save_path: Optional[str] = None
+                 ) -> dict[str, Any]:
+        """Export a self-contained, unexternalized copy of a COMP.
+
+        Mirrors Externalize.Release.py: copies the target, recursively
+        strips every external file reference, resets custom pars on the
+        copy to their defaults (skipping the About page so version /
+        build metadata survives), and saves to {Name}_{Version}.tox in
+        the chosen folder.
+
+        Args:
+            target: The COMP to release. Must be a COMP.
+            name: Release name. Defaults to target.name.
+            version: Release version string. Defaults to target.par.Version
+                if present, else "1.0.0".
+            save_path: Absolute path for the released .tox. If omitted,
+                writes to {project.folder}/{name}_{version}.tox.
+
+        Returns:
+            dict with 'success' and 'path' on success or 'error' on failure.
+        """
+        if self._performMode:
+            return {'error': 'Perform Mode active'}
+        if target is None or target.family != 'COMP':
+            return {'error': 'Release requires a COMP target'}
+
+        name = name or target.name
+        if version is None:
+            try:
+                version = (str(target.par.Version.eval())
+                           if hasattr(target.par, 'Version') else '1.0.0')
+            except Exception:
+                version = '1.0.0'
+            version = version or '1.0.0'
+        if save_path is None:
+            save_path = f'{project.folder}/{name}_{version}.tox'
+
+        # Pre-save the original so its .tox on disk is current. Without
+        # this, the copy could reflect stale .tox content if the user has
+        # made unsaved par edits since the last Save().
+        try:
+            ext_tox = target.par.externaltox.eval()
+            if ext_tox:
+                target.save(ext_tox)
+        except Exception as e:
+            self.Log(
+                f'Release: pre-save of {target.path} failed (continuing): '
+                f'{e}', 'WARNING')
+
+        parent_comp = target.parent()
+        try:
+            copy = parent_comp.copy(target)
+        except Exception as e:
+            return {'error': f'copy failed: {e}'}
+
+        copy.name = name
+        copy.nodeX = 0
+        copy.nodeY = 0
+
+        success = False
+        try:
+            # Reset every custom par to its default, EXCEPT pars on the
+            # About page (those carry user-facing release metadata).
+            for par in copy.customPars:
+                try:
+                    if par.page is not None and par.page.name == 'About':
+                        continue
+                    if par.defaultMode == ParMode.CONSTANT:
+                        par.mode = ParMode.CONSTANT
+                        par.val = par.default
+                    elif par.defaultMode == ParMode.EXPRESSION:
+                        par.mode = ParMode.EXPRESSION
+                        par.expr = par.defaultExpr
+                    elif par.defaultMode == ParMode.BIND:
+                        par.mode = ParMode.BIND
+                        par.bindExpr = par.defaultBindExpr
+                except Exception as e:
+                    self.Log(
+                        f'Release: failed to reset par {par.name} on '
+                        f'copy: {e}', 'DEBUG')
+
+            # Strip every external file reference on the copy. After this,
+            # the copy is fully self-contained -- no .tox / .py / .json
+            # links to anything on disk.
+            self._unexternalizeOperator(copy)
+
+            # TODO: set the copy's current parameter page to its first
+            # custom page so the released .tox opens to a useful view.
+            # TD doesn't expose a direct API for this; revisit when the
+            # right mechanism is identified.
+
+            try:
+                copy.save(save_path)
+                success = True
+                self.Log(f'Released {target.path} -> {save_path}', 'SUCCESS')
+            except Exception as e:
+                self.Log(f'Release save failed: {e}', 'ERROR')
+                return {'error': f'save failed: {e}'}
+
+        finally:
+            try:
+                copy.destroy()
+            except Exception as e:
+                self.Log(
+                    f'Release: failed to destroy temp copy: {e}', 'WARNING')
+
+        return {'success': success, 'path': save_path}
+
+    def _unexternalizeOperator(self, op_ref: OP) -> None:
+        """Recursively clear external-file refs from an op and its children.
+
+        Ported from Externalize.Release.unexternalizeOperator. For COMPs
+        clears par.externaltox + par.enableexternaltox and recurses into
+        children. For DATs clears par.file + par.syncfile.
+        """
+        try:
+            if op_ref.isCOMP:
+                if hasattr(op_ref.par, 'externaltox'):
+                    op_ref.par.externaltox.readOnly = False
+                    op_ref.par.externaltox = ''
+                if hasattr(op_ref.par, 'enableexternaltox'):
+                    op_ref.par.enableexternaltox = False
+                for child in op_ref.children:
+                    self._unexternalizeOperator(child)
+            elif op_ref.isDAT:
+                if hasattr(op_ref.par, 'file'):
+                    op_ref.par.file.readOnly = False
+                    op_ref.par.file = ''
+                if hasattr(op_ref.par, 'syncfile'):
+                    op_ref.par.syncfile = False
+        except Exception as e:
+            self.Log(
+                f'_unexternalizeOperator on {op_ref.path}: {e}', 'WARNING')
+
+    def ReleaseProject(self, save_path: Optional[str] = None) -> dict[str, Any]:
+        """Save a self-contained, unexternalized copy of the entire project.
+
+        Snapshots every par-set op's external-file state, strips it all,
+        saves the .toe to a user-chosen path (working path becomes the
+        release path), then restores the originals in the LIVE SESSION.
+        The original on-disk .toe is not touched; only in-memory state
+        is shuffled. After the save, the working path stays at the
+        release path -- use File > Open or project.load() to switch back.
+
+        Args:
+            save_path: Absolute path for the released .toe. If omitted,
+                prompts via ui.chooseFile.
+
+        Returns:
+            dict with 'success' and 'path', or 'error'.
+        """
+        if self._performMode:
+            return {'error': 'Perform Mode active'}
+
+        if save_path is None:
+            chosen = ui.chooseFile(
+                load=False,
+                fileTypes=['toe'],
+                title='Release Project - choose .toe path',
+                start=str(Path(project.folder).parent),
+            )
+            if not chosen:
+                return {'error': 'cancelled'}
+            save_path = str(chosen)
+
+        # Snapshot every par-set op so we can restore after the save.
+        snapshot: list[dict] = []
+        try:
+            for comp in self.root.findChildren(type=COMP, parName='externaltox'):
+                if not comp.par.externaltox.eval():
+                    continue
+                snapshot.append({
+                    'op': comp,
+                    'family': 'COMP',
+                    'externaltox': comp.par.externaltox.eval(),
+                    'externaltox_expr': comp.par.externaltox.expr,
+                    'externaltox_readonly': comp.par.externaltox.readOnly,
+                    'enableexternaltox': comp.par.enableexternaltox.eval(),
+                })
+            for dat in self.root.findChildren(type=DAT, parName='file'):
+                if not dat.par.file.eval():
+                    continue
+                snapshot.append({
+                    'op': dat,
+                    'family': 'DAT',
+                    'file': dat.par.file.eval(),
+                    'file_readonly': dat.par.file.readOnly,
+                    'syncfile': dat.par.syncfile.eval(),
+                })
+        except Exception as e:
+            return {'error': f'snapshot failed: {e}'}
+
+        prev_folder = ''
+        try:
+            prev_folder = str(self.my.par.Folder.eval())
+        except Exception:
+            pass
+
+        self.Log(
+            f'ReleaseProject: stripping {len(snapshot)} externalizations '
+            f'and saving to {save_path}', 'INFO')
+
+        save_success = False
+        try:
+            for entry in snapshot:
+                ref = entry['op']
+                try:
+                    if entry['family'] == 'COMP':
+                        ref.par.externaltox.readOnly = False
+                        ref.par.externaltox.expr = ''
+                        ref.par.externaltox = ''
+                        ref.par.enableexternaltox = False
+                    elif entry['family'] == 'DAT':
+                        ref.par.file.readOnly = False
+                        ref.par.file = ''
+                        ref.par.syncfile = False
+                except Exception as e:
+                    self.Log(
+                        f'ReleaseProject strip failed for {ref.path}: {e}',
+                        'WARNING')
+
+            # Clear Embody's Folder so the released .toe doesn't try to
+            # re-externalize on next open. The Embody COMP stays in place
+            # (user can re-enable by setting the Folder back), but it's
+            # inert by default.
+            try:
+                self.my.par.Folder = ''
+            except Exception:
+                pass
+
+            try:
+                project.save(save_path)
+                save_success = True
+                self.Log(f'Released project to {save_path}', 'SUCCESS')
+            except Exception as e:
+                self.Log(f'ReleaseProject save failed: {e}', 'ERROR')
+                return {'error': f'save failed: {e}'}
+
+        finally:
+            # Restore live session even on failure -- never leave the
+            # running project in a stripped state.
+            try:
+                if prev_folder:
+                    self.my.par.Folder = prev_folder
+            except Exception:
+                pass
+            for entry in snapshot:
+                ref = entry['op']
+                try:
+                    if entry['family'] == 'COMP':
+                        if entry.get('externaltox_expr'):
+                            ref.par.externaltox.expr = entry['externaltox_expr']
+                        else:
+                            ref.par.externaltox = entry['externaltox']
+                        ref.par.externaltox.readOnly = entry['externaltox_readonly']
+                        ref.par.enableexternaltox = entry['enableexternaltox']
+                    elif entry['family'] == 'DAT':
+                        ref.par.file = entry['file']
+                        ref.par.file.readOnly = entry['file_readonly']
+                        ref.par.syncfile = entry['syncfile']
+                except Exception as e:
+                    self.Log(
+                        f'ReleaseProject restore failed for {ref.path}: {e}',
+                        'WARNING')
+            self.Log(
+                'ReleaseProject: live session externalizations restored. '
+                'Working path is now the release path -- File > Open the '
+                'original to keep developing.',
+                'INFO')
+
+        return {
+            'success': save_success,
+            'path': save_path,
+            'stripped_count': len(snapshot),
+        }
+
     @staticmethod
     def _computeTDNFingerprint(comp, tdn_paths: set = None) -> tuple:
         """Compute a hashable fingerprint of a TDN COMP's network structure.
@@ -4786,11 +5067,14 @@ class EmbodyExt:
         is_comp = (target.family == 'COMP')
         rel = (target.par.externaltox.eval() if is_comp
                else target.par.file.eval())
+        # PopDialog caps at 4 buttons -- the other actions are covered by
+        # row clicks: File-column click = Reveal, x-column click = Remove.
+        # Re-externalize is a power-user operation reachable by clearing
+        # par.externaltox manually + saving to a new folder.
         buttons = ['Save']
         if is_comp:
-            # PopDialog buttons clip past ~10 chars; keep labels short
             buttons.append('Reload')
-        buttons.append('More')
+            buttons.append('Release')
         buttons.append('Cancel')
 
         def on_choice(info, t=target):
@@ -4799,8 +5083,8 @@ class EmbodyExt:
                 self._saveOpFromMenu(t)
             elif btn == 'Reload':
                 self._actionMenuReload(t)
-            elif btn == 'More':
-                self._actionMenuMore(t)
+            elif btn == 'Release':
+                self._actionMenuReleaseName(t)
             # Cancel / unknown -> no-op
 
         self._popDialog(
@@ -4850,36 +5134,82 @@ class EmbodyExt:
             self.Log(
                 f'Reload from .tox failed for {target.path}: {e}', 'ERROR')
 
-    def _actionMenuMore(self, target: OP) -> None:
-        """Async secondary menu with less-frequent / destructive actions."""
-        buttons = [
-            'Reveal',
-            'Re-extern',
-            'Remove',
-            'Cancel',
-        ]
-
+    def _actionMenuReleaseName(self, target: OP) -> None:
+        """First step of the Release cascade: prompt for the release name."""
         def on_choice(info, t=target):
-            btn = info.get('button')
-            is_comp = (t.family == 'COMP')
-            rel = (t.par.externaltox.eval() if is_comp
-                   else t.par.file.eval())
-            if btn == 'Reveal':
-                if rel:
-                    self.OpenSaveFile(rel)
-            elif btn == 'Re-extern':
-                self._reexternalizeViaMenu(t)
-            elif btn == 'Remove':
-                self.RemoveListerRow(t.path, rel, delete_file=True)
+            if info.get('button') != 'OK':
+                return
+            new_name = (info.get('enteredText') or '').strip() or t.name
+            self._actionMenuReleaseVersion(t, new_name)
 
         self._popDialog(
-            text=f'Choose an action for {target.path}.',
-            title=f'Embody: {target.name} - more',
-            buttons=buttons,
+            text='Release name (defaults to the operator name).',
+            title=f'Embody: release {target.name} (1/3)',
+            buttons=['OK', 'Cancel'],
             callback=on_choice,
-            esc_button=len(buttons),  # Cancel
+            esc_button=2,
             enter_button=1,
+            text_entry=target.name,
         )
+
+    def _actionMenuReleaseVersion(self, target: OP, new_name: str) -> None:
+        """Second step: prompt for version. Auto-adds par.Version if missing."""
+        if not hasattr(target.par, 'Version'):
+            try:
+                about_page = next(
+                    (p for p in target.customPages if p.name == 'About'),
+                    None)
+                if about_page is None:
+                    about_page = target.appendCustomPage('About')
+                pg = about_page.appendStr('Version', label='Version')
+                p = pg[0]
+                p.default = '1.0.0'
+                p.val = '1.0.0'
+                p.help = ('Release version (set by Embody Release). Stored '
+                          'on the COMP for future releases.')
+            except Exception as e:
+                self.Log(
+                    f'Release: could not add Version par to {target.path}: {e}',
+                    'WARNING')
+
+        current_version = (
+            str(target.par.Version.eval())
+            if hasattr(target.par, 'Version') else '1.0.0'
+        ) or '1.0.0'
+
+        def on_choice(info, t=target, name=new_name):
+            if info.get('button') != 'OK':
+                return
+            new_version = (info.get('enteredText') or '').strip() or '1.0.0'
+            try:
+                if hasattr(t.par, 'Version'):
+                    t.par.Version.val = new_version
+            except Exception:
+                pass
+            self._actionMenuReleaseFolder(t, name, new_version)
+
+        self._popDialog(
+            text=f'Release version for "{new_name}".',
+            title=f'Embody: release {target.name} (2/3)',
+            buttons=['OK', 'Cancel'],
+            callback=on_choice,
+            esc_button=2,
+            enter_button=1,
+            text_entry=current_version,
+        )
+
+    def _actionMenuReleaseFolder(self, target: OP, new_name: str,
+                                  new_version: str) -> None:
+        """Final step: pick folder, then run Release."""
+        start = self.ExternalizationsFolder or project.folder
+        chosen = ui.chooseFolder(
+            title=f'Release {new_name}_{new_version}.tox - choose folder',
+            start=start)
+        if not chosen:
+            return
+        save_path = f'{chosen}/{new_name}_{new_version}.tox'
+        self.Release(target, name=new_name, version=new_version,
+                     save_path=save_path)
 
     def _actionMenuNotExternalized(self, target: OP) -> None:
         """Async menu for an op that is not yet externalized."""

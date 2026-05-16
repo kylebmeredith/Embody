@@ -1,5 +1,33 @@
 # Changelog
 
+## Phase 6 — Release / unexternalize + bug #8 fix
+
+Two related features and a destructive-save fix.
+
+### Per-COMP Release
+
+`EmbodyExt.Release(target, name=None, version=None, save_path=None)`: copies the target COMP, recursively clears every `par.externaltox` / `par.file` / `par.syncfile` on the copy, resets all custom pars on the copy to their `defaultMode` / `default` / `defaultExpr` / `defaultBindExpr` (skipping the About page so version metadata survives), and saves to `{Name}_{Version}.tox`. Destroys the temp copy regardless of save success. Mirrors `C:/Users/Kyle/dev/touch/Externalize/Release.py` with two divergences: the custom par is named `Version` (not `Toxversion`), and the par is auto-added to the target COMP on first release.
+
+Action menu integration: the "Release" button is now top-level on externalized COMPs alongside Save / Reload / Cancel. The previous "More" sub-menu went away -- Reveal lives on the File column click, Remove on the × column click, Re-externalize is a power-user "clear par.externaltox + re-set" sequence (or use the Folder param to relocate everything).
+
+Release cascade: PopDialog → name (default = `target.name`) → version (default = `par.Version` if set, else `1.0.0`; the value is saved back to `par.Version`) → `ui.chooseFolder`. Pre-saves the original to its `.tox` so the released copy reflects current state.
+
+### Project-wide Release
+
+`EmbodyExt.ReleaseProject(save_path=None)`: walks every par-set COMP and DAT, snapshots external-file state, strips every `par.externaltox` / `par.file` / `par.syncfile`, clears `Embody.par.Folder` so the released `.toe` doesn't try to externalize on next open, saves `.toe` to a chosen path, and **restores the originals in the live session** in a `finally` block so a failed save can't leave the running project in a stripped state.
+
+After the save the project's working path is the release path. The original `.toe` on disk is untouched. User reopens the original `.toe` via `File > Open` to keep developing. (TD doesn't expose a save-as-copy that preserves the working path.)
+
+Triggered by the new `Releaseproject` pulse param on the Embody COMP's Embody page; `parexec.py:onPulse` routes it.
+
+### Bug #8 fix (rolled into this commit)
+
+Every project save was deleting Phase 2's `.tdn` sidecars (`/embody/Embody/help.tdn`, `list.tdn`, etc.) because `TDN.ExportNetwork`'s stale-file cleanup was destroying anything not in the "protected" list -- and under par-driven discovery the protected list (`_getAllTrackedTDNFiles`) didn't know about legacy sidecars or par-driven siblings. Two changes:
+
+- `TDN.ExportNetwork` gains a `cleanup_stale: bool = True` parameter. When False, the `_cleanupStaleTDNFiles` step is skipped entirely.
+- `_writeTdnSidecar` passes `cleanup_stale=False`. Single-file sidecar writes have no business sweeping the project folder; they write their own `.tdn` and leave everything else alone.
+- `_getAllTrackedTDNFiles` now also enumerates the `.tdn` paths of every par-set COMP (via `_buildTDNRelPath`), not just legacy `strategy='tdn'` rows. Still used by callers that *do* want cleanup -- the full-project export.
+
 ## Phase 7 — drop ThreadManager dependency
 
 The Envoy MCP server and the TDN async export pipeline no longer depend on `op.TDResources.ThreadManager`, which only shipped in TouchDesigner 2025.30000+. Both now run on stdlib `threading.Thread` with a self-rescheduling main-thread pump via `run(..., delayFrames=1)`. **Works on TD 2022.x+** — same architecture, different glue. Tested live on 2025; ready for LightPath's 2023 install.
