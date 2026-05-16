@@ -4960,13 +4960,10 @@ class EmbodyExt:
     def OpenActionMenu(self, op_path: Optional[str] = None) -> None:
         """Open the contextual Embody action menu for an operator.
 
-        Phase 8: custom listCOMP popup at /embody/Embody/window_action_menu.
-        Replaces the previous PopDialog cascade -- vertical action list,
-        unlimited items, full label width, keyboard nav (up/down/Enter/Esc).
-        Text-entry sub-flows (Release name/version) still use PopDialog.
-
         If op_path is None, picks the target from the user's current pane:
-        rollover op -> first selected -> pane owner.
+        the rollover op first, then the first selected op, then the pane
+        owner as a fallback. The menu's options vary by op family and by
+        whether the op is already externalized.
         """
         if self._performMode:
             return
@@ -4975,149 +4972,13 @@ class EmbodyExt:
             self.Log('Action menu: no operator under cursor', 'WARNING')
             return
         if target.family not in ('COMP', 'DAT'):
-            self.Log(
-                f'Action menu: {target.family} not supported', 'WARNING')
+            self.Log(f'Action menu: {target.family} not supported', 'WARNING')
             return
 
-        items = self._buildActionItems(target)
-        if not items:
-            self.Log(
-                f'Action menu: no actions available for {target.path}',
-                'INFO')
-            return
-
-        # Stash the target so the listCOMP / keyboardin callbacks can find it.
-        self._action_menu_target_path = target.path
-
-        # Populate the action_items table.
-        am = self.my.op('action_menu')
-        if am is None:
-            self.Log(
-                'Action menu COMP missing at /embody/Embody/action_menu '
-                '-- run Embody.Reset() or restore the .toe',
-                'ERROR')
-            return
-        table = am.op('action_items')
-        table.clear()
-        table.appendRow(['label', 'action_id', 'enabled'])
-        for label, action_id, enabled in items:
-            table.appendRow([label, action_id, '1' if enabled else '0'])
-
-        # Reset selection to first item.
-        am.store('actionmenu_selected_row', 1)
-        lst = am.op('list1')
-        row_count = max(1, len(items))
-        row_height = 26
-        if lst:
-            # listCOMP renders exactly `rows` rows -- it does not auto-derive
-            # from the source DAT. Setting only par.h leaves you with one
-            # tall row, not N rows. Set both.
-            lst.par.rows = row_count
-            lst.par.cols = 1
-            lst.par.h = row_count * row_height + 2
-
-        # Resize and open the window.
-        win = self.my.op('window_action_menu')
-        if win:
-            try:
-                win.par.winh = row_count * row_height + 4
-            except Exception:
-                pass
-            try:
-                win.par.winopen.pulse()
-            except Exception as e:
-                self.Log(f'window_action_menu open failed: {e}', 'WARNING')
-
-    def CloseActionMenu(self) -> None:
-        """Close the action menu window."""
-        win = self.my.op('window_action_menu')
-        if win:
-            try:
-                win.par.winclose.pulse()
-            except Exception:
-                pass
-
-    def _buildActionItems(self, target: OP) -> list:
-        """Compute the action list for an operator, as (label, action_id,
-        enabled) tuples in display order.
-        """
-        is_comp = (target.family == 'COMP')
-        is_externalized = self._isOpExternalized(target)
-
-        items: list[tuple[str, str, bool]] = []
-
-        if is_externalized:
-            items.append(('Save', 'save', True))
-            if is_comp:
-                items.append(('Reload from .tdn', 'reload_tdn', True))
-                items.append(('Reload from .tox', 'reload_tox', True))
-                items.append(('Release...', 'release', True))
-            items.append(('Reveal in file browser', 'reveal', True))
-            items.append(('Remove externalization', 'remove', True))
+        if self._isOpExternalized(target):
+            self._actionMenuExternalized(target)
         else:
-            if not is_comp and target.type not in self.supported_dat_types:
-                items.append(
-                    (f'(DAT type {target.type!r} not supported)', 'noop', False))
-                return items
-            default_par = ('Defaulttoxfolder' if is_comp
-                           else 'Defaultscriptfolder')
-            has_default = bool(
-                getattr(self.my.par, default_par, None)
-                and getattr(self.my.par, default_par).eval())
-            if has_default:
-                items.append(
-                    ('Externalize (default folder)', 'extern_default', True))
-            items.append(
-                ('Externalize (choose folder)...', 'extern_choose', True))
-        return items
-
-    def _dispatchAction(self, action_id: str) -> None:
-        """Run the action identified by action_id on the stashed target."""
-        path = getattr(self, '_action_menu_target_path', None)
-        target = op(path) if path else None
-        # Close the window before running -- the action may itself open
-        # another dialog (Release cascade) and we don't want the menu
-        # lingering on top of it.
-        self.CloseActionMenu()
-        if target is None:
-            self.Log(
-                f'Action menu: target {path!r} no longer exists', 'WARNING')
-            return
-        try:
-            if action_id == 'save':
-                self._saveOpFromMenu(target)
-            elif action_id == 'reload_tdn':
-                self.ReloadFromTdn(target.path)
-            elif action_id == 'reload_tox':
-                self._reloadFromTox(target)
-            elif action_id == 'release':
-                self._actionMenuReleaseName(target)
-            elif action_id == 'reveal':
-                is_comp = (target.family == 'COMP')
-                rel = (target.par.externaltox.eval() if is_comp
-                       else target.par.file.eval())
-                if rel:
-                    self.OpenSaveFile(rel)
-            elif action_id == 'remove':
-                is_comp = (target.family == 'COMP')
-                rel = (target.par.externaltox.eval() if is_comp
-                       else target.par.file.eval())
-                self.RemoveListerRow(target.path, rel, delete_file=True)
-            elif action_id == 'extern_default':
-                self._externalizeViaMenu(target, use_default=True)
-            elif action_id == 'extern_choose':
-                self._externalizeViaMenu(target, use_default=False)
-            elif action_id == 'noop':
-                pass
-            else:
-                self.Log(
-                    f'Action menu: unknown action_id {action_id!r}',
-                    'WARNING')
-        except Exception as e:
-            import traceback
-            self.Log(
-                f'Action {action_id!r} failed: {e}', 'ERROR',
-                traceback.format_exc()[-400:])
+            self._actionMenuNotExternalized(target)
 
     def _popDialog(self, *, text: str, title: str, buttons: list,
                     callback, esc_button: Optional[int] = None,
@@ -5206,6 +5067,40 @@ class EmbodyExt:
         except Exception:
             pass
         return False
+
+    def _actionMenuExternalized(self, target: OP) -> None:
+        """Async menu for an op that is already externalized."""
+        is_comp = (target.family == 'COMP')
+        rel = (target.par.externaltox.eval() if is_comp
+               else target.par.file.eval())
+        # PopDialog caps at 4 buttons -- the other actions are covered by
+        # row clicks: File-column click = Reveal, x-column click = Remove.
+        # Re-externalize is a power-user operation reachable by clearing
+        # par.externaltox manually + saving to a new folder.
+        buttons = ['Save']
+        if is_comp:
+            buttons.append('Reload')
+            buttons.append('Release')
+        buttons.append('Cancel')
+
+        def on_choice(info, t=target):
+            btn = info.get('button')
+            if btn == 'Save':
+                self._saveOpFromMenu(t)
+            elif btn == 'Reload':
+                self._actionMenuReload(t)
+            elif btn == 'Release':
+                self._actionMenuReleaseName(t)
+            # Cancel / unknown -> no-op
+
+        self._popDialog(
+            text=f'{target.path}\nexternalized to: {rel}',
+            title=f'Embody: {target.name}',
+            buttons=buttons,
+            callback=on_choice,
+            esc_button=len(buttons),  # Cancel
+            enter_button=1,           # Save
+        )
 
     def _actionMenuReload(self, target: OP) -> None:
         """Sub-menu: choose how to reload an externalized COMP from disk."""
@@ -5324,6 +5219,40 @@ class EmbodyExt:
         save_path = f'{chosen}/{new_name}_{new_version}.tox'
         self.Release(target, name=new_name, version=new_version,
                      save_path=save_path)
+
+    def _actionMenuNotExternalized(self, target: OP) -> None:
+        """Async menu for an op that is not yet externalized."""
+        is_comp = (target.family == 'COMP')
+        if not is_comp and target.type not in self.supported_dat_types:
+            self.Log(
+                f'Cannot externalize DAT type {target.type!r}', 'WARNING')
+            return
+        default_par = ('Defaulttoxfolder' if is_comp
+                       else 'Defaultscriptfolder')
+        has_default = bool(
+            getattr(self.my.par, default_par, None)
+            and getattr(self.my.par, default_par).eval())
+        buttons = []
+        if has_default:
+            buttons.append('To default')
+        buttons.append('Choose...')
+        buttons.append('Cancel')
+
+        def on_choice(info, t=target):
+            btn = info.get('button')
+            if btn == 'To default':
+                self._externalizeViaMenu(t, use_default=True)
+            elif btn == 'Choose...':
+                self._externalizeViaMenu(t, use_default=False)
+
+        self._popDialog(
+            text=f'Externalize {target.path}?',
+            title=f'Embody: {target.name}',
+            buttons=buttons,
+            callback=on_choice,
+            esc_button=len(buttons),  # Cancel
+            enter_button=1,
+        )
 
     def _externalizeViaMenu(self, target: OP, use_default: bool) -> None:
         """Set the external file par and run Update."""

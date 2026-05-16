@@ -1,30 +1,5 @@
 # Changelog
 
-## Phase 8 — Custom listCOMP action menu (replaces PopDialog cascade)
-
-The Ctrl+W contextual menu now opens a custom `windowCOMP` with an embedded vertical `listCOMP` instead of cascading `ui.messageBox` / `TDResources.PopDialog` dialogs. PopDialog clipped button labels past ~6 chars and caps at 4 buttons -- the new menu has no such limits, fits 6+ actions in a single dialog with full label width, and supports proper keyboard navigation (arrow up/down + Enter + Esc).
-
-### New COMPs (live in `.toe`)
-
-- `/embody/Embody/action_menu` -- `containerCOMP` holding the menu UI. Its children:
-  - `list1` (`listCOMP`): single-column vertical action list, themed against Embody's existing `Listrowcolor` / `Listrowselectcolor` / `Textcolor` pars.
-  - `action_items` (`tableDAT`): the source of truth for the rendered rows. Schema `label / action_id / enabled`. Python rewrites this each time the menu opens to match the target's state.
-  - `list1_callbacks` (`textDAT`, externalized to `dev/embody/Embody/action_menu/list1_callbacks.py`): `onInitTable`, `onInitRow`, `onInitCell`, `onClickRow`, `onRollover` (highlight on hover). Click dispatches `parent.Embody.ext.Embody._dispatchAction(action_id)`.
-  - `keyboardin1` (`keyboardinDAT`) + `keyboardin1_callbacks` (`textDAT`, externalized to `dev/embody/Embody/action_menu/keyboardin1_callbacks.py`): arrow up/down moves the selection (wraps top/bottom), Enter dispatches, Esc closes.
-- `/embody/Embody/window_action_menu` -- `windowCOMP` with `winop = ./action_menu`. Borderless, always-on-top, centered. Dynamic height: `winh = row_count * 26 + 4` so the window auto-fits the action list.
-
-### Python rewrite (EmbodyExt)
-
-- `OpenActionMenu(op_path=None)` now builds a flat action list via `_buildActionItems(target)`, populates the `action_items` table, and pulses `window_action_menu.par.winopen`. Stashes `self._action_menu_target_path` so listCOMP / keyboardin callbacks can resolve back to the target.
-- `_buildActionItems(target)` returns a flat list of `(label, action_id, enabled)` for the target's state. For an externalized COMP: Save / Reload from .tdn / Reload from .tox / Release... / Reveal in file browser / Remove externalization (six items in one dialog -- not possible under PopDialog's 4-button cap). For an externalized DAT: Save / Reveal / Remove. For an unexternalized op: Externalize (default folder, if `Defaulttoxfolder`/`Defaultscriptfolder` is set) / Externalize (choose folder)...
-- `_dispatchAction(action_id)` routes to the right helper -- `Save`, `ReloadFromTdn`, `_reloadFromTox`, `_actionMenuReleaseName`, `OpenSaveFile`, `RemoveListerRow`, `_externalizeViaMenu`. Closes the window first so the action can open its own dialog cleanly (e.g. Release name/version PopDialogs).
-- `CloseActionMenu()` pulses `window_action_menu.par.winclose`.
-- Deleted: `_actionMenuExternalized`, `_actionMenuNotExternalized` -- both dead under the new flow. `_actionMenuReload` stays (used by the per-row Reload column in the manager list; PopDialog for two options works fine). `_popDialog` stays for the Release name/version single-text-entry sub-flows where PopDialog excels.
-
-### Theming
-
-The list cells use Embody's existing UI color params, so the action menu matches the manager list automatically.
-
 ## Phase 6 — Release / unexternalize + bug #8 fix
 
 Two related features and a destructive-save fix.
