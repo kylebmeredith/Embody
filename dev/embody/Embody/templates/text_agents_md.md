@@ -14,11 +14,11 @@ This project uses **[Embody](https://github.com/dylanroscover/Embody)** (TouchDe
 
 ## Critical Rules
 
-1. **Prefer `.tdn` files for reading TDN-externalized COMPs** — `.tdn` files are JSON on disk with complete network structure (operators, parameters, connections, positions, flags, DAT content, annotations). Reading them directly is faster than MCP round-trips. Check `externalizations.tsv` (strategy column) to identify TDN-strategy COMPs. To edit: modify the `.tdn` file on disk, then call `import_network` via MCP with the COMP path, the parsed JSON, and `clear_first=True` to reload it in TD. Use MCP when you need live runtime state (evaluated expressions, cook errors) or for non-TDN operators.
-2. **Use Envoy MCP tools for live TD state and non-TDN operators** — never say "I can't access that binary file." For operators not externalized as TDN, use MCP tools to inspect and modify them.
+1. **Prefer `.tdn` files for reading externalized COMPs** — every externalized COMP gets both `.tox` (binary) and `.tdn` (JSON sidecar with complete network structure). Reading the `.tdn` directly is faster than MCP round-trips. Call `get_externalizations` to list what's tracked. To edit: modify the `.tdn` on disk, then call `import_network` via MCP with the COMP path, the parsed JSON, and `clear_first=True` to reload it in TD. Use MCP when you need live runtime state (evaluated expressions, cook errors).
+2. **Use Envoy MCP tools for live TD state and non-externalized operators** — never say "I can't access that binary file." Use MCP tools to inspect and modify any operator.
 3. **Do NOT assume network paths** — use `query_network` on `/` to discover the actual root structure.
 4. **Default to the current network** — use `execute_python` with `result = ui.panes.current.owner.path` to find the active pane.
-5. **Never edit `externalizations.tsv` directly** — managed exclusively by Embody's tracking system.
+5. **Discovery is par-driven** — a COMP is externalized iff `par.externaltox != ''`, a DAT iff `par.file != ''`. No tracking file on disk; the in-memory Externalizations table is rebuilt from a live scan on every Update / Refresh.
 6. **Always use forward slashes** in file paths.
 7. **Check for errors and warnings after creating operators** — `get_op_errors` with `recurse=true` immediately after creation.
 8. **Thread boundary**: MCP server worker thread must never import TD modules. All TD access goes through `_execute_in_td()`.
@@ -63,7 +63,6 @@ Embody/
 ├── CLAUDE.md                              # Claude Code specific instructions (if using Claude)
 ├── dev/
 │   ├── embody/
-│   │   ├── externalizations.tsv          # Tracking table (NEVER edit directly)
 │   │   └── Embody/                       # Main extension source
 │   │       ├── EmbodyExt.py              # Core externalization engine
 │   │       ├── EnvoyExt.py               # MCP server extension

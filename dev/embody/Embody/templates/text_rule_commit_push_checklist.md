@@ -12,7 +12,7 @@ This rule applies to EVERY commit, not just releases. For version-specific relea
 
 - Run `git diff --stat` and `git diff --name-status` (or `git diff --cached` if already staged) to see every file touched.
 - **Read the diffs**, not just the filenames. Understand what each change does and why. Never commit changes you haven't reviewed.
-- Confirm no unintended files are staged (secrets, `.env`, build artifacts, `externalizations.tsv`).
+- Confirm no unintended files are staged (secrets, `.env`, build artifacts).
 
 ### 2. Documentation Audit
 
