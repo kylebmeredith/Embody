@@ -2379,27 +2379,63 @@ class EmbodyExt:
         return None
 
     def _getAllTrackedTDNFiles(self, exclude_path: Optional[str] = None) -> list[str]:
-        """Collect absolute paths of ALL tracked .tdn files in the table.
+        """Collect absolute paths of ALL .tdn files Embody is responsible for.
 
-        Used to protect .tdn files belonging to other TDN COMPs from
-        being deleted by stale-file cleanup during a single-COMP export.
+        Used as the "protected" list for stale-file cleanup during a single-
+        COMP TDN export so we don't delete sibling sidecars. Under the
+        par-driven model, every externalized COMP gets a .tdn sidecar via
+        Phase 2's _writeTdnSidecar, so the protected set is the union of:
+
+        - Legacy strategy='tdn' rows in the externalizations table (rare
+          now, but kept for back-compat with .toes that still hold them)
+        - The .tdn path of every COMP with par.externaltox set
+          (computed via _buildTDNRelPath)
+
+        Without this union, every save of a single COMP's .tdn would
+        delete every other COMP's .tdn -- the Phase 2 always-both design
+        creates many sidecars in the same folder and they all need
+        protection from each other.
 
         Args:
             exclude_path: Skip this op_path (the one being exported).
         """
+        protected: list[str] = []
+        seen: set[str] = set()
+
+        # Source 1: legacy strategy='tdn' table entries.
         table = self.Externalizations
-        if not table or table[0, 'strategy'] is None:
-            return []
-        protected = []
-        for i in range(1, table.numRows):
-            if table[i, 'strategy'].val != 'tdn':
-                continue
-            path = table[i, 'path'].val
-            if path == exclude_path:
-                continue
-            rel = table[i, 'rel_file_path'].val
-            if rel:
-                protected.append(str(self.buildAbsolutePath(rel)))
+        if table and table[0, 'strategy'] is not None:
+            for i in range(1, table.numRows):
+                if table[i, 'strategy'].val != 'tdn':
+                    continue
+                path = table[i, 'path'].val
+                if path == exclude_path:
+                    continue
+                rel = table[i, 'rel_file_path'].val
+                if not rel:
+                    continue
+                abs_path = str(self.buildAbsolutePath(rel))
+                if abs_path not in seen:
+                    seen.add(abs_path)
+                    protected.append(abs_path)
+
+        # Source 2: par-driven COMP sidecars. Every par.externaltox-set
+        # COMP gets a .tdn sidecar at _buildTDNRelPath(comp). Add them all
+        # so a single-COMP export doesn't wipe its siblings' sidecars.
+        try:
+            for comp in self.getOpsByPar(COMP):
+                if comp.path == exclude_path:
+                    continue
+                rel = self._buildTDNRelPath(comp)
+                abs_path = str(self.buildAbsolutePath(rel))
+                if abs_path not in seen:
+                    seen.add(abs_path)
+                    protected.append(abs_path)
+        except Exception as e:
+            self.Log(
+                f'_getAllTrackedTDNFiles: par-driven scan failed: {e}',
+                'WARNING')
+
         return protected
 
     def _getCompStrategy(self, comp: OP) -> Optional[str]:
@@ -2612,12 +2648,22 @@ class EmbodyExt:
         Always-both-formats: every TOX externalization gets a .tdn sidecar
         alongside it for diff-friendly version control. Failures are
         non-fatal -- the .tox is the canonical artifact, the .tdn is bonus.
+
+        cleanup_stale=False: sidecar writes never sweep other .tdn files.
+        ExportNetwork's stale-file cleanup defaults to deleting every
+        .tdn in the project folder that isn't in the protected list, and
+        under par-driven discovery the protected list doesn't cover
+        orphan / legacy .tdn files we have no record of -- so the cleanup
+        was destroying sibling sidecars on every save (bug #8). Single-
+        file sidecar writes don't need any cleanup; they just write
+        their own .tdn and leave everything else alone.
         """
         try:
             tdn_path = self.buildAbsolutePath(self._buildTDNRelPath(comp))
             tdn_path.parent.mkdir(parents=True, exist_ok=True)
             self.my.ext.TDN.ExportNetwork(
-                root_path=comp.path, output_file=str(tdn_path))
+                root_path=comp.path, output_file=str(tdn_path),
+                cleanup_stale=False)
         except Exception as e:
             self.Log(f"TDN sidecar export failed for {comp.path}", "WARNING", str(e))
 

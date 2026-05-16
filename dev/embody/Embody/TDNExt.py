@@ -352,6 +352,7 @@ class TDNExt:
 	def ExportNetwork(self, root_path: str = '/', include_dat_content: Optional[bool] = None,
 					  output_file: Optional[str] = None, max_depth: Optional[int] = None,
 					  cleanup_protected: Optional[list[str]] = None,
+					  cleanup_stale: bool = True,
 					  embed_all: bool = False,
 					  include_storage: Optional[bool] = None) -> dict[str, Any]:
 		"""
@@ -498,8 +499,10 @@ class TDNExt:
 				protected = [filepath]
 				if cleanup_protected:
 					protected.extend(cleanup_protected)
-				stale = TDNExt._cleanupStaleTDNFiles(
-					before_tdn, protected, scan_folder)
+				stale = []
+				if cleanup_stale:
+					stale = TDNExt._cleanupStaleTDNFiles(
+						before_tdn, protected, scan_folder)
 				if stale:
 					self._log(
 						f'Cleaned up {len(stale)} stale .tdn file(s)',
