@@ -1,5 +1,17 @@
 # Changelog
 
+## Phase 7 — drop ThreadManager dependency
+
+The Envoy MCP server and the TDN async export pipeline no longer depend on `op.TDResources.ThreadManager`, which only shipped in TouchDesigner 2025.30000+. Both now run on stdlib `threading.Thread` with a self-rescheduling main-thread pump via `run(..., delayFrames=1)`. **Works on TD 2022.x+** — same architecture, different glue. Tested live on 2025; ready for LightPath's 2023 install.
+
+- **EnvoyExt**: `Start()` rewritten — `Thread(target=worker_wrapper, daemon=True).start()` instead of `ThreadManager.TDTask(...) + EnqueueTask(standalone=True)`. The wrapper latches any worker exception into `self._server_error` for the main thread to read on next tick. `self._server_thread` and `self._server_running` (bool latch) replace `self.current_task`. `_cleanupStaleThreads` collapses from ~60 lines of `ThreadManagerExt.Threads / Tasks / ManagerCondition / Runningthreads` poking to a 10-line "signal shutdown_event on the prior thread" -- daemon flag handles the rest. `_onRefresh` gains a pre-pass that detects `thread.is_alive() → False` transitions and dispatches `_onServerSuccess` / `_onServerError` exactly once per Start cycle, eliminating the need for `SuccessHook` / `ExceptHook` callbacks.
+- **EnvoyExt.`_pumpFrame`**: new method. Called every frame via `run(..., delayFrames=1)`, calls `_onRefresh`, reschedules itself while `_server_running` is True. Instance-identity guard stops stale chains from previous `EnvoyExt` instances after extension reinit. Kicked off at the end of `Start()`.
+- **TDNExt.`ExportNetworkAsync`**: same swap — `threading.Thread(target=worker_wrapper, daemon=True)` for the file-write worker, plus a new `_pumpExportFrame` that drives `_onExportRefresh` every frame and dispatches `_onExportSuccess` / `_onExportError` when the worker thread exits.
+- **execute.py.onFrameStart**: belt-and-suspenders pump — also calls `Envoy._onRefresh()` and `TDN._onExportRefresh()` each frame. Redundant with the `run()` chains but harmless; insulates against the chain breaking on a weird reinit edge case.
+- The `EmbodyExt` line that silences `TDAppLogger.threadManager_logger` stays. It's harmless on TD versions where that logger doesn't exist — `logging.getLogger()` returns a logger object regardless.
+
+Revert tag: `pre-phase7-threadmanager-refactor`.
+
 ## Embody Fork — par-driven discovery (in progress)
 
 The fork replaces Embody's tag-based discovery and persistent tracking with the lighter philosophy of `Externalize`: TD's own native parameters are the source of truth, the in-memory state is derived on demand, and the on-disk layout is a flat folder the user controls rather than a mirror of the network hierarchy. Plan in `docs/refactor-plan.md`.

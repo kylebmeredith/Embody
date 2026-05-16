@@ -765,20 +765,35 @@ class TDNExt:
 					'file': None,
 				}
 
-		# Create and enqueue TDTask
-		thread_manager = op.TDResources.ThreadManager
-		task = thread_manager.TDTask(
-			target=worker,
-			SuccessHook=self._onExportSuccess,
-			ExceptHook=self._onExportError,
-			RefreshHook=self._onExportRefresh,
+		# Phase 7: stdlib threading instead of op.TDResources.ThreadManager.
+		# The worker just waits on done_event (set by _onExportRefresh after
+		# the main thread finishes batched per-op extraction) and then writes
+		# the final .tdn file. _onExportRefresh / _onExportSuccess /
+		# _onExportError are called per frame from execute.py:onFrameStart,
+		# not by a TDTask hook.
+		import threading
+		def _worker_wrapper():
+			try:
+				worker()
+				self._export_completed = True
+				self._export_error = None
+			except BaseException as e:
+				self._export_completed = True
+				self._export_error = e
+
+		self._export_thread = threading.Thread(
+			target=_worker_wrapper,
+			name=f'TDNExport-{root_path.replace("/", "_")}',
+			daemon=True,
 		)
-		thread = thread_manager.EnqueueTask(task, standalone=True)
-		if thread is None:
-			self._log(
-				'Thread Manager at capacity -- export queued but may be '
-				'delayed. Try restarting Envoy to free stale threads.',
-				'WARNING')
+		self._export_completed = False
+		self._export_error = None
+		self._export_thread.start()
+
+		# Kick off the main-thread pump. _pumpExportFrame calls
+		# _onExportRefresh and re-schedules until _export_state is None.
+		run(f"op('{self.ownerComp.path}').ext.TDN._pumpExportFrame()",
+			delayFrames=1, fromOP=self.ownerComp)
 
 		self._log(
 			f'Exporting {len(op_paths)} operators from {root_path}...',
@@ -822,10 +837,51 @@ class TDNExt:
 		self.ExportNetworkAsync(
 			output_file='auto', embed_all=(choice == 1))
 
+	def _pumpExportFrame(self):
+		"""Self-rescheduling main-thread tick for the export worker.
+
+		Started by ExportNetworkAsync and reschedules itself every frame
+		until _export_state is cleared (set to None by _onExportSuccess /
+		_onExportError). Identical pattern to EnvoyExt._pumpFrame.
+		"""
+		try:
+			if self.ownerComp.ext.TDN is not self:
+				return
+		except Exception:
+			return
+		self._onExportRefresh()
+		if self._export_state is not None:
+			run(f"op('{self.ownerComp.path}').ext.TDN._pumpExportFrame()",
+				delayFrames=1, fromOP=self.ownerComp)
+
 	def _onExportRefresh(self):
-		"""RefreshHook: Process a batch of operators per frame (main thread)."""
+		"""Process a batch of operators per frame (main thread).
+
+		Phase 7: called by execute.py:onFrameStart instead of a TDTask
+		RefreshHook. Also handles the "worker thread finished" transition:
+		when _export_completed flips, it dispatches the success or error
+		hook exactly once.
+		"""
 		state = self._export_state
-		if state is None or state['done']:
+		if state is None:
+			return
+
+		# Worker-thread completion check (replaces SuccessHook/ExceptHook).
+		# state['done'] flips when the main thread finishes batched extraction
+		# and signals done_event; _export_completed flips when the worker
+		# thread exits after writing the file.
+		if getattr(self, '_export_completed', False):
+			self._export_completed = False
+			err = getattr(self, '_export_error', None)
+			self._export_error = None
+			self._export_thread = None
+			if err is None:
+				self._onExportSuccess()
+			else:
+				self._onExportError(err)
+			return
+
+		if state['done']:
 			return
 
 		try:

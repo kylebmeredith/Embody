@@ -78,6 +78,23 @@ def onExit():
 	return
 
 def onFrameStart(frame):
+	# Phase 7 main-thread pumps: previously these were RefreshHook callbacks
+	# fired by op.TDResources.ThreadManager. With stdlib threading we drive
+	# them ourselves from the Execute DAT's per-frame callback so the tool
+	# works on TD 2022.x+ (ThreadManager was first released in 2025.30000).
+	#
+	# Both are no-ops when no worker is running -- early return is cheap.
+	# Defensive try/except: a bug in one pump must not break the other or
+	# stall the main thread.
+	try:
+		parent.Embody.ext.Envoy._onRefresh()
+	except Exception as e:
+		# Use debug() so a chronic error doesn't spam the log on every frame.
+		debug(f'Embody onFrameStart Envoy pump failed: {e}')
+	try:
+		parent.Embody.ext.TDN._onExportRefresh()
+	except Exception as e:
+		debug(f'Embody onFrameStart TDN pump failed: {e}')
 	return
 
 def onFrameEnd(frame):

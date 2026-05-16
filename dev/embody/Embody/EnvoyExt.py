@@ -5,9 +5,13 @@ Enables AI coding assistants to interact with TouchDesigner via the Model Contex
 Supports creating, destroying, editing operators and their parameters.
 
 Architecture:
-- MCP server runs in a worker thread (via Thread Manager)
-- TD operations execute on main thread (via OnRefresh callback)
+- MCP server runs in a worker thread (stdlib threading.Thread, daemon=True)
+- TD operations execute on the main thread via _onRefresh, called every
+  frame by the Embody COMP's Execute DAT (onFrameStart)
 - Bidirectional queues handle request/response communication
+- Pre-Phase 7 this used op.TDResources.ThreadManager; the queue + frame-
+  polling pattern is TD's canonical pre-ThreadManager design and works
+  on every TD version with Python 3 (2022.x onward), not just 2025+.
 
 Usage:
 1. Embody auto-installs dependencies via uv on init (see EmbodyExt._setupEnvironment)
@@ -1483,7 +1487,14 @@ class EnvoyExt:
             'response': self.response_queue,
         }
         sys._envoy_queues = _q_registry
-        self.current_task: Optional[Any] = None
+        self.current_task: Optional[Any] = None  # legacy alias, kept for log strings
+        self._server_thread: Optional[Thread] = None
+        # Latched error from the worker thread; _onRefresh reads it after
+        # thread.is_alive() flips to False and clears it.
+        self._server_error: Optional[BaseException] = None
+        # True between thread.start() and the success/error hook firing.
+        # Prevents _onRefresh from missing the exit transition between frames.
+        self._server_running: bool = False
         self._server_gen: int = 0  # Generation counter for stale callback detection
         self._last_served_log_id: int = 0
         self._restart_count: int = 0
@@ -1491,9 +1502,6 @@ class EnvoyExt:
         self._MAX_RESTARTS: int = 3
         self._RESTART_RESET_SECONDS: float = 120.0  # Reset counter after 2 min uptime
         self._venv_recreated: bool = False  # Guard: only auto-recreate venv once per session
-
-        # Get Thread Manager from TDResources
-        self.ThreadManager = op.TDResources.ThreadManager
 
         # Shut down any server left over from a previous init cycle.
         # Extensions get re-initialized when TD recompiles externalized code
@@ -1557,67 +1565,28 @@ class EnvoyExt:
         self.shutdown_event.set()
 
     def _cleanupStaleThreads(self) -> None:
-        """Remove stale Envoy threads from the Thread Manager.
+        """Signal any stale Envoy server thread to exit cleanly.
 
-        Safety net called from Start() before creating the new server thread.
-        Primary cleanup happens in onDestroyTD(). This catches edge cases:
-        - onDestroyTD didn't run (project load, first init)
-        - Multiple rapid reinits
+        Phase 7: with stdlib threading the cleanup surface collapses to
+        "tell the previous thread its shutdown event is set." The thread
+        polls the event in its tight loop and exits on its own. Joining
+        is *not* needed -- the daemon flag handles the rare case where TD
+        exits before the thread tears down.
+
+        Previous instances' shutdown events were already set in __init__'s
+        registry sweep; this is a belt-and-suspenders pass for the current
+        instance's prior server thread (a Start -> Stop -> Start sequence).
         """
-        try:
-            self.ThreadManager.ext.ThreadManagerExt
-        except Exception:
+        thread = self._server_thread
+        if thread is None:
             return
-
-        # Log Thread Manager state before cleanup
-        thread_info = []
-        for t in self.ThreadManager.ext.ThreadManagerExt.Threads:
-            task = getattr(t, 'TDTask', None)
-            target = getattr(task, 'target', None) if task else None
-            name = getattr(target, '__name__', '?') if target else 'None'
-            thread_info.append(
-                f'{t.name}({name}, pool={t.InPool}, alive={t.is_alive()})')
-        if thread_info:
+        if thread.is_alive():
             self._log(
-                f'Thread Manager pre-cleanup: {len(thread_info)} threads: '
-                f'{"; ".join(thread_info)}', 'DEBUG')
-
-        cleaned = 0
-        for thread in list(self.ThreadManager.ext.ThreadManagerExt.Threads):
-            task = getattr(thread, 'TDTask', None)
-            if task is None:
-                continue
-            target = getattr(task, 'target', None)
-            if target is None or getattr(target, '__name__', '') != '_runServer':
-                continue
-
-            # Skip pool workers -- shutdown_event handles their cleanup via
-            # workLoop. Calling clean() would destroy the worker permanently.
-            if thread.InPool:
-                self._log(
-                    'Skipping pool-worker _runServer '
-                    '(shutdown_event handles it)', 'DEBUG')
-                continue
-
-            # All standalone _runServer threads here are stale:
-            # onDestroyTD already cleaned the previous instance's thread,
-            # and self.current_task is None (new task not created yet).
-            thread.clean()
-            with self.ThreadManager.ext.ThreadManagerExt.ManagerCondition:
-                if task in self.ThreadManager.ext.ThreadManagerExt.Tasks:
-                    self.ThreadManager.ext.ThreadManagerExt.Tasks.remove(task)
-            cleaned += 1
-
-        if cleaned:
-            # CRITICAL: sync the Runningthreads parameter so EnqueueTask
-            # sees the actual thread count, not the stale pre-cleanup value.
-            self.ThreadManager.par.Runningthreads.val = len(
-                self.ThreadManager.ext.ThreadManagerExt.Threads)
-            self._log(
-                f'Cleaned {cleaned} stale Envoy thread(s) -- '
-                f'{len(self.ThreadManager.ext.ThreadManagerExt.Threads)}'
-                f' threads remain '
-                f'(capacity: {self.ThreadManager.ext.ThreadManagerExt.MaxNumberOfThreads.eval()})', 'DEBUG')
+                f'Signalling stale Envoy server thread (name={thread.name}) '
+                f'to exit', 'DEBUG')
+            self.shutdown_event.set()
+        self._server_thread = None
+        self._server_running = False
 
     def _forceCloseOldServer(self) -> None:
         """Force-close a stuck old uvicorn server so the port is freed.
@@ -1750,7 +1719,7 @@ class EnvoyExt:
         return None
 
     def Start(self) -> None:
-        """Start MCP server via op.TDResources.ThreadManager"""
+        """Start MCP server in a daemon worker thread (stdlib threading)."""
         if self.ownerComp.fetch('envoy_running', False):
             self._log('Server already running (duplicate Start ignored)', 'DEBUG')
             return
@@ -1821,36 +1790,9 @@ class EnvoyExt:
         # Update status
         self.ownerComp.par.Envoystatus = 'Starting...'
 
-        # Wrap hooks with generation guard so stale callbacks from a previous
-        # server thread don't corrupt the running server's state.
-        # Two checks: (1) instance identity -- detects extension reinit (Update,
-        # recompile) where a NEW EnvoyExt instance replaced us; (2) generation
-        # counter -- detects rapid Start() calls on the SAME instance.
-        def guarded_success(returnValue=None, _gen=gen):
-            try:
-                if self.ownerComp.ext.Envoy is not self:
-                    self._log('Stale server thread from previous init (ignored)', 'DEBUG')
-                    return
-            except Exception:
-                return
-            if self._server_gen != _gen:
-                self._log('Stale server thread exited (ignored)', 'DEBUG')
-                return
-            self._onServerSuccess(returnValue)
-
-        def guarded_error(error, _gen=gen):
-            try:
-                if self.ownerComp.ext.Envoy is not self:
-                    self._log(f'Stale server error from previous init (ignored): {error}', 'DEBUG')
-                    return
-            except Exception:
-                return
-            if self._server_gen != _gen:
-                self._log(f'Stale server error (ignored): {error}', 'DEBUG')
-                return
-            self._onServerError(error)
-
-        # Free Thread Manager slots occupied by stale Envoy threads
+        # Signal any prior server thread (this instance's) to exit. Stale
+        # threads from previous extension instances were already poked in
+        # __init__'s registry sweep.
         self._cleanupStaleThreads()
 
         # Fresh queues for the new server thread -- the old worker thread
@@ -1864,21 +1806,53 @@ class EnvoyExt:
         }
         sys._envoy_queues = _q_registry
 
-        # Create and enqueue a TDTask
-        self.current_task = self.ThreadManager.TDTask(
-            target=self._runServer,
-            args=(port, self.request_queue, self.response_queue, self.shutdown_event),
-            SuccessHook=guarded_success,
-            ExceptHook=guarded_error,
-            RefreshHook=self._onRefresh
-        )
-        thread = self.ThreadManager.EnqueueTask(
-            self.current_task, standalone=True)
+        # Stash the generation locally so the worker wrapper closes over it
+        # and we can detect a stale thread on exit.
+        _gen = gen
+        port_local = port
+        request_queue_local = self.request_queue
+        response_queue_local = self.response_queue
+        shutdown_event_local = self.shutdown_event
 
-        if thread is None:
-            self._log(
-                'Thread Manager at capacity -- Envoy task queued for pool '
-                'execution instead of standalone thread.', 'WARNING')
+        def _worker_wrapper():
+            """Run _runServer; latch any exception for the main thread to read.
+
+            _onRefresh checks self._server_thread.is_alive() every frame and,
+            on the first frame after is_alive() flips to False, fires
+            _onServerError(latched) or _onServerSuccess() depending on what
+            this wrapper recorded. Generation + instance-identity guards
+            inside those hooks protect against the rare case where this
+            worker outlives its EnvoyExt instance.
+            """
+            try:
+                self._runServer(port_local, request_queue_local,
+                                response_queue_local, shutdown_event_local)
+                # Mark clean exit -- _onRefresh distinguishes by None vs
+                # latched exception.
+                if self._server_gen == _gen:
+                    self._server_error = None
+            except BaseException as e:  # capture even SystemExit / KeyboardInterrupt
+                # Generation guard: don't pollute a newer instance's error state.
+                if self._server_gen == _gen:
+                    self._server_error = e
+
+        self._server_thread = Thread(
+            target=_worker_wrapper,
+            name=f'EnvoyServer-{port}-gen{gen}',
+            daemon=True,
+        )
+        self._server_running = True
+        self._server_error = None
+        self._server_thread.start()
+
+        # Kick off the main-thread pump. _pumpFrame calls _onRefresh and
+        # re-schedules itself every frame while _server_running is True.
+        # This is self-bootstrapping -- no executeDAT toggle dependency,
+        # works on any TD version. (execute.py:onFrameStart also calls
+        # _onRefresh as a belt-and-suspenders pump; if its toggle is off
+        # this run() chain is the sole mechanism.)
+        run(f"op('{self.ownerComp.path}').ext.Envoy._pumpFrame()",
+            delayFrames=1, fromOP=self.ownerComp)
 
         # Update status
         self.ownerComp.par.Envoystatus = f'Running on port {port}'
@@ -1988,17 +1962,73 @@ class EnvoyExt:
             'result': result
         })
 
+    def _pumpFrame(self):
+        """Self-rescheduling main-thread tick.
+
+        Started by Start() and reschedules itself every frame until
+        _server_running flips False (set by _onRefresh on exit detection).
+        Calling _onRefresh directly each frame is identical to what
+        ThreadManager.RefreshHook did before Phase 7.
+
+        Instance-identity guard: a stale _pumpFrame chain from a previous
+        EnvoyExt instance (extension reinit) must not keep firing on the
+        new instance. The chain stops naturally when _server_running is
+        False on the old instance.
+        """
+        try:
+            if self.ownerComp.ext.Envoy is not self:
+                # Stale chain from a previous extension instance -- stop.
+                return
+        except Exception:
+            return
+        self._onRefresh()
+        if self._server_running:
+            run(f"op('{self.ownerComp.path}').ext.Envoy._pumpFrame()",
+                delayFrames=1, fromOP=self.ownerComp)
+
     def _onRefresh(self):
+        """Main-thread tick.
+
+        Phase 7: called by the Embody COMP's Execute DAT every frame
+        (onFrameStart). Two responsibilities, in order:
+
+        1. If the worker thread exited since the last tick, fire the
+           success/error hook exactly once and clear _server_running.
+        2. Drain pending requests off request_queue and execute them on
+           the main thread.
+
+        This is the same architecture the old TDTask RefreshHook had --
+        we just call it ourselves now instead of letting ThreadManager
+        call it.
         """
-        RefreshHook - Called every frame on main thread while task is running.
-        Polls request_queue for operations queued by the worker thread.
-        """
-        # Guard: bail if this RefreshHook fires on a stale instance
-        # (e.g., thread wasn't cleaned yet after extension reinit)
+        # Guard: bail if this fires on a stale instance (extension reinit
+        # before the new instance reattached the Execute DAT).
         try:
             if self.ownerComp.ext.Envoy is not self:
                 return
         except Exception:
+            return
+
+        # Thread liveness check: detect transition from alive -> dead and
+        # dispatch the appropriate hook. The Execute DAT keeps ticking
+        # forever, so this needs the _server_running latch to ensure
+        # the hook fires exactly once per Start cycle.
+        thread = self._server_thread
+        if thread is not None and self._server_running and not thread.is_alive():
+            self._server_running = False
+            self._server_thread = None
+            err = self._server_error
+            self._server_error = None
+            if err is None:
+                self._onServerSuccess()
+            else:
+                self._onServerError(err)
+            # Don't drain the queue on exit -- the worker is gone; any
+            # pending payloads are stale (and won't have responses honored).
+            return
+
+        # No server running -> nothing to drain.
+        if not self._server_running:
             return
 
         # Process up to MAX_REQUESTS_PER_FRAME to avoid frame stalls from
@@ -2039,19 +2069,23 @@ class EnvoyExt:
             self._send_response(request_id, result)
 
     def _onServerSuccess(self, returnValue=None):
-        """SuccessHook - Called when the thread task completes successfully"""
+        """Called from _onRefresh when the worker thread exited cleanly."""
         self._log('Server thread exited')
         self.ownerComp.store('envoy_running', False)
         self.current_task = None
+        self._server_thread = None
+        self._server_running = False
         if self.ownerComp.par.Envoyenable.eval() and not self.ownerComp.ext.Embody._performMode:
             self._scheduleRestart('Server exited unexpectedly')
         # If Envoyenable is already off, Stop() set the status -- don't overwrite
 
     def _onServerError(self, error):
-        """ExceptHook - Called when the thread task errors"""
+        """Called from _onRefresh when the worker thread exited with an exception."""
         self._log(f'Server error: {error}', 'ERROR')
         self.ownerComp.store('envoy_running', False)
         self.current_task = None
+        self._server_thread = None
+        self._server_running = False
         if self.ownerComp.par.Envoyenable.eval() and not self.ownerComp.ext.Embody._performMode:
             self._scheduleRestart(f'Server error: {error}')
 
