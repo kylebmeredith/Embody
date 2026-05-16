@@ -5006,17 +5006,21 @@ class EmbodyExt:
         # Reset selection to first item.
         am.store('actionmenu_selected_row', 1)
         lst = am.op('list1')
+        row_count = max(1, len(items))
+        row_height = 26
         if lst:
-            # Size list to match number of rows + a little padding.
-            row_count = max(1, len(items))
-            row_height = 26
+            # listCOMP renders exactly `rows` rows -- it does not auto-derive
+            # from the source DAT. Setting only par.h leaves you with one
+            # tall row, not N rows. Set both.
+            lst.par.rows = row_count
+            lst.par.cols = 1
             lst.par.h = row_count * row_height + 2
 
         # Resize and open the window.
         win = self.my.op('window_action_menu')
         if win:
             try:
-                win.par.winh = row_count * 26 + 4
+                win.par.winh = row_count * row_height + 4
             except Exception:
                 pass
             try:
