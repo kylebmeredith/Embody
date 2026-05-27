@@ -5,12 +5,12 @@ Takes the raw externalizations select DAT as input and:
 1. Injects synthetic parent rows for tree hierarchy
 2. Computes depth, has_children for each row
 3. Filters by expanded_paths for tree expand/collapse
-4. Adds strategy_state column for the unified Strategy column
+4. Adds row_state column (Saved / Dirty / ParChange / Exporting / Comp)
 5. Sorts hierarchically (parents before children, alphabetical)
 
 Output columns:
-  path, type, strategy, rel_file_path, timestamp, build, touch_build,
-  strategy_state, depth, has_children
+  path, type, rel_file_path, timestamp, build, touch_build,
+  row_state, depth, has_children
 """
 
 MAX_VISIBLE_ROWS = 100
@@ -26,7 +26,6 @@ def onCook(scriptOp):
 	in_headers = [c.val for c in inp.row(0)]
 	path_idx = in_headers.index('path')
 	type_idx = in_headers.index('type')
-	has_strategy = 'strategy' in in_headers
 
 	# Build data rows dict keyed by path
 	data_rows = {}
@@ -234,9 +233,53 @@ def onCook(scriptOp):
 	# Do NOT call store() here -- it triggers recooks and would cause
 	# an infinite cook loop since this DAT fetches from the same keys.
 
+	# Apply column sort if one is active.  Sort state is stored on the
+	# Embody COMP as {'col': <field>, 'dir': 1|-1}.  Sorting flattens the
+	# tree visually (children no longer cluster under their parent) --
+	# users who want hierarchy keep the default tree order.
+	sort_state = parent.Embody.fetch('sort_state', None, search=False)
+	if sort_state:
+		field = sort_state.get('col')
+		direction = sort_state.get('dir', 1)
+		_ROW_STATE_RANK = {
+			'Dirty': 0, 'ParChange': 1, 'Exporting': 2,
+			'Saved': 3, 'Comp': 4, '': 5,
+		}
+
+		def _sort_key(p):
+			row = data_rows.get(p, {})
+			if field == 'path':
+				return (p.rsplit('/', 1)[-1] or p).lower()
+			if field == 'rel_file_path':
+				return row.get('rel_file_path', '').lower()
+			if field == 'type':
+				return row.get('type', '').lower()
+			if field == 'row_state':
+				# Resolve the same state derivation as the writer below.
+				rel = row.get('rel_file_path', '')
+				oper = op(p)
+				is_comp = oper and oper.family == 'COMP'
+				if not rel and not is_comp:
+					st = ''
+				elif is_comp and not rel:
+					st = 'Comp'
+				elif is_comp and p == exporting_path:
+					st = 'Exporting'
+				elif row.get('dirty', '') == 'Par':
+					st = 'ParChange'
+				elif row.get('dirty', '') in ('True', 'true', '1'):
+					st = 'Dirty'
+				else:
+					st = 'Saved'
+				return _ROW_STATE_RANK.get(st, 6)
+			return p.lower()
+
+		visible = sorted(visible, key=_sort_key,
+		                 reverse=(direction == -1))
+
 	# Write output
-	out_headers = ['path', 'type', 'strategy', 'rel_file_path', 'timestamp',
-	               'build', 'touch_build', 'strategy_state',
+	out_headers = ['path', 'type', 'rel_file_path', 'timestamp',
+	               'build', 'touch_build', 'row_state',
 	               'depth', 'has_children']
 	scriptOp.appendRow(out_headers)
 
@@ -253,63 +296,34 @@ def onCook(scriptOp):
 
 		oper = op(path)
 		is_comp = oper and oper.family == 'COMP'
+		rel = row.get('rel_file_path', '')
+		dirty_val = row.get('dirty', '')
 
-		# Get strategy -- derive from old schema if column missing
-		if has_strategy:
-			strategy = row.get('strategy', '')
+		# Compute row state. Every externalized op (COMP or DAT) shares the
+		# same state machine -- no per-strategy split.
+		if not rel and not is_comp:
+			# Synthetic parent or unexternalized op
+			row_state = ''
+		elif is_comp and not rel:
+			# Unexternalized COMP shown only as a tree parent
+			row_state = 'Comp'
+		elif is_comp and path == exporting_path:
+			row_state = 'Exporting'
+		elif dirty_val == 'Par':
+			row_state = 'ParChange'
+		elif dirty_val in ('True', 'true', '1'):
+			row_state = 'Dirty'
 		else:
-			row_type = row.get('type', '')
-			if row_type == 'tdn':
-				strategy = 'tdn'
-			elif is_comp and row.get('rel_file_path', ''):
-				strategy = 'tox'
-			elif row.get('rel_file_path', ''):
-				ext = row['rel_file_path'].rsplit('.', 1)[-1] if '.' in row['rel_file_path'] else ''
-				strategy = ext
-			else:
-				strategy = ''
-
-		# Compute unified strategy_state for the Strategy column
-		if not strategy and not is_comp:
-			# Synthetic parent or DAT without strategy
-			strategy_state = ''
-		elif strategy == 'tdn':
-			if path == exporting_path:
-				strategy_state = 'TDN_Exporting'
-			else:
-				dirty_val = row.get('dirty', '')
-				if dirty_val == 'Par':
-					strategy_state = 'TDN_ParChange'
-				elif dirty_val in ('True', 'true', '1'):
-					strategy_state = 'TDN_Dirty'
-				else:
-					strategy_state = 'TDN_Saved'
-		elif strategy == 'tox':
-			dirty_val = row.get('dirty', '')
-			if dirty_val == 'Par':
-				strategy_state = 'TOX_ParChange'
-			elif dirty_val in ('True', 'true', '1'):
-				strategy_state = 'TOX_Dirty'
-			else:
-				strategy_state = 'TOX_Saved'
-		elif is_comp and not strategy:
-			# Unexternalized COMP (synthetic parent row)
-			strategy_state = 'Comp'
-		elif strategy:
-			# DAT with a strategy (py, json, md, etc.)
-			strategy_state = 'DAT_Saved'
-		else:
-			strategy_state = ''
+			row_state = 'Saved'
 
 		scriptOp.appendRow([
 			path,
 			row.get('type', ''),
-			strategy,
-			row.get('rel_file_path', ''),
+			rel,
 			row.get('timestamp', ''),
 			row.get('build', ''),
 			row.get('touch_build', ''),
-			strategy_state,
+			row_state,
 			str(depth),
 			hc,
 		])

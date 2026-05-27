@@ -1,4 +1,4 @@
-﻿"""
+"""
 List COMP callbacks for Embody Manager UI.
 
 Renders the externalization tree with expand/collapse, rollover
@@ -11,36 +11,49 @@ comp - the List COMP (available in all callbacks)
 from datetime import datetime, timezone
 
 # --- Column indices ---
+# Timestamp column hidden (2026-05-19) -- it showed the last _scanAndPopulate
+# time, not last-save time, so every row had an identical value that
+# updated together on every Refresh. Useless visual noise.
 COL_EXPANDO = 0
 COL_PATH = 1
 COL_TYPE = 2
 COL_FILE = 3
-COL_STRATEGY = 4
-COL_SAVE = 5
-COL_RELOAD = 6
-COL_TIMESTAMP = 7
-COL_DELETE = 8
+COL_SAVE = 4
+COL_RELOAD = 5
+COL_DELETE = 6
 
-NUM_COLS = 9
+NUM_COLS = 7
 
 HEADER_LABELS = [
 	'', 'Network Path', '', 'External File Path',
-	'Strategy', 'Save', 'Reload', 'Timestamp', 'Del',
+	'Save', 'Reload', 'Del',
 ]
-COL_WIDTHS    = [16, 0, 80, 200, 70, 40, 40, 190, 36]
-COL_STRETCHES = [False, True, False, True, False, False, False, False, False]
+COL_WIDTHS    = [16, 0, 80, 200, 48, 60, 36]
+COL_STRETCHES = [False, True, False, True, False, False, False]
 
-# Glyphs for the save / reload icon cells (single-char to keep columns narrow)
-SAVE_GLYPH = '↓'    # ↓
-RELOAD_GLYPH = '↻'  # ↻
+# Map list columns to data fields for sorting.  Columns not in this map
+# are not sortable (action buttons, expand-arrow).
+SORTABLE_COLUMNS = {
+	1: 'path',           # COL_PATH -- sort by op name
+	2: 'type',           # COL_TYPE
+	3: 'rel_file_path',  # COL_FILE
+	4: 'row_state',      # COL_SAVE -- sort by dirtiness
+}
 
-# Strategy states that mark a COMP / DAT as dirty (save is meaningful)
-DIRTY_STATES = {'TOX_Dirty', 'TOX_ParChange', 'TDN_Dirty', 'TDN_ParChange'}
-SAVED_STATES = {'TOX_Saved', 'TDN_Saved', 'DAT_Saved'}
+# Material Design Icons codepoints (private-use area U+F0000–U+F1FFFF).
+# The font must be set to 'Material Design Icons' on the rendering cell.
+# Same font used by toolbar buttons -- see container_left/save_comp etc.
+SAVE_GLYPH = '\U000f0193'    # MDI content-save
+RELOAD_GLYPH = '\U000f0450'  # MDI refresh
+ICON_FONT = 'Material Design Icons'
+
+# Row states that mark a COMP / DAT as dirty (save is meaningful) vs saved.
+DIRTY_STATES = {'Dirty', 'ParChange'}
+SAVED_STATES = {'Saved'}
 TEXT_PAD_X = 6  # horizontal padding for left-justified cells
 
-# Row whose Strategy cell is "active" (menu open) -- shows "..." while menu visible
-_active_strategy_row = -1
+# Row whose state cell is "active" (menu open) -- shows "..." while menu visible
+_active_state_row = -1
 
 # Persistent selection -- tracks the selected operator path (survives refresh/reorder)
 _selected_path = ''
@@ -149,9 +162,10 @@ def _ensure_theme():
 
 
 def clearActiveStrategy():
-	"""Clear the active strategy row (called when menu closes)."""
-	global _active_strategy_row
-	_active_strategy_row = -1
+	"""Clear the active state row (called when menu closes). Name kept for
+	parexec/callbacks compatibility."""
+	global _active_state_row
+	_active_state_row = -1
 
 
 def _source():
@@ -161,29 +175,6 @@ def _source():
 
 def _row_bg(row):
 	return _t['row'] if row % 2 == 0 else _t['row_alt']
-
-
-def _strategy_style(state):
-	"""Return (text, bgColor, textColor) for a strategy_state value."""
-	if state == 'TOX_Saved':
-		return ('TOX', _t['saved'], None)
-	elif state == 'TOX_Dirty':
-		return ('TOX', _t['dirty'], None)
-	elif state == 'TOX_ParChange':
-		return ('TOX Par', _t['par_change'], None)
-	elif state == 'TDN_Saved':
-		return ('TDN', _t['tdn_saved'], None)
-	elif state == 'TDN_Dirty':
-		return ('TDN', _t['dirty'], None)
-	elif state == 'TDN_ParChange':
-		return ('TDN Par', _t['par_change'], None)
-	elif state == 'TDN_Exporting':
-		return ('...', _t['tdn_amber'], None)
-	elif state == 'Comp':
-		return ('', _t['comp'], None)
-	elif state == 'DAT_Saved':
-		return ('', None, None)  # DATs show strategy text in _apply_cell
-	return ('', None, None)
 
 
 def _apply_cell(attribs, row, col, data, highlight=False):
@@ -223,60 +214,37 @@ def _apply_cell(attribs, row, col, data, highlight=False):
 		attribs.textOffsetX = TEXT_PAD_X
 		attribs.bgColor = bg
 
-	elif col == COL_STRATEGY:
-		st = data[row, 'strategy_state'].val
-		strategy = data[row, 'strategy'].val
-		text, st_bg, st_text = _strategy_style(st)
-
-		if _active_strategy_row == row and st not in ('DAT_Saved', 'TDN_Exporting', ''):
-			# Menu is open for this row -- show "..." with rollover color
-			attribs.text = '...' if st != 'Comp' else ''
-			if st in ('TOX_Dirty', 'TDN_Dirty'):
-				attribs.bgColor = _t['dirty_roll']
-			elif st in ('TOX_ParChange', 'TDN_ParChange'):
-				attribs.bgColor = _t['par_change_roll']
-			elif st == 'TOX_Saved':
-				attribs.bgColor = _t['saved_roll']
-			elif st == 'TDN_Saved':
-				attribs.bgColor = _t['tdn_saved_roll']
-			elif st == 'Comp':
-				attribs.bgColor = _t['comp_roll']
-		elif st == 'DAT_Saved':
-			# Show the file extension as the strategy label
-			attribs.text = strategy
-			attribs.bgColor = bg
-		elif st_bg:
-			attribs.text = text
-			attribs.bgColor = st_bg
-			if st_text:
-				attribs.textColor = st_text
-		else:
-			attribs.text = text
-			attribs.bgColor = bg
-		attribs.textJustify = JustifyType.CENTER
-
 	elif col == COL_SAVE:
-		st = data[row, 'strategy_state'].val
-		if st in DIRTY_STATES:
-			# Dirty: bright accent on the glyph
+		st = data[row, 'row_state'].val
+		# Save cell encodes both action affordance AND state-color (no separate
+		# State column). bgColor: red for Dirty, amber for ParChange, dim
+		# for Saved, transparent for unexternalized rows.
+		if st == 'Dirty':
 			attribs.text = SAVE_GLYPH
 			attribs.textColor = _t['text']
-			attribs.bgColor = bg
-		elif st in SAVED_STATES:
-			# Clean externalization: still allow a manual re-save, but dim
+			attribs.bgColor = _t['dirty']
+		elif st == 'ParChange':
+			attribs.text = SAVE_GLYPH
+			attribs.textColor = _t['text']
+			attribs.bgColor = _t['par_change']
+		elif st == 'Saved':
 			attribs.text = SAVE_GLYPH
 			attribs.textColor = _t['text_dim']
 			attribs.bgColor = bg
+		elif st == 'Exporting':
+			attribs.text = ''
+			attribs.bgColor = _t['tdn_amber']
 		else:
 			attribs.text = ''
 			attribs.bgColor = bg
 		attribs.textJustify = JustifyType.CENTER
-		attribs.fontSizeX = 12
+		attribs.fontFace = ICON_FONT
+		attribs.fontSizeX = 14
 
 	elif col == COL_RELOAD:
-		st = data[row, 'strategy_state'].val
-		# Reload only makes sense for COMPs that have a .tox / .tdn on disk.
-		if st in (DIRTY_STATES | {'TOX_Saved', 'TDN_Saved'}):
+		st = data[row, 'row_state'].val
+		# Reload only makes sense for COMPs that have a .tdn on disk.
+		if st in (DIRTY_STATES | SAVED_STATES):
 			attribs.text = RELOAD_GLYPH
 			attribs.textColor = _t['text_dim']
 			attribs.bgColor = bg
@@ -284,30 +252,11 @@ def _apply_cell(attribs, row, col, data, highlight=False):
 			attribs.text = ''
 			attribs.bgColor = bg
 		attribs.textJustify = JustifyType.CENTER
-		attribs.fontSizeX = 12
-
-	elif col == COL_TIMESTAMP:
-		ts = data[row, 'timestamp'].val
-		if ts and parent.Embody.par.Localtimestamps.eval():
-			try:
-				utc_dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
-				local_dt = utc_dt.astimezone()
-				tz_abbr = local_dt.strftime("%Z")
-				# macOS returns full names like "Pacific Daylight Time"; shorten to acronym
-				if len(tz_abbr) > 5:
-					tz_abbr = ''.join(w[0] for w in tz_abbr.split())
-				ts = local_dt.strftime("%Y-%m-%d %H:%M:%S") + ' ' + tz_abbr
-			except ValueError:
-				pass
-		attribs.text = ts
-		attribs.textJustify = JustifyType.CENTERLEFT
-		attribs.textOffsetX = TEXT_PAD_X
-		attribs.bgColor = bg
+		attribs.fontFace = ICON_FONT
+		attribs.fontSizeX = 14
 
 	elif col == COL_DELETE:
-		has_ext = bool(data[row, 'rel_file_path'].val
-					   or data[row, 'strategy_state'].val.startswith('TOX')
-					   or data[row, 'strategy_state'].val.startswith('TDN'))
+		has_ext = bool(data[row, 'rel_file_path'].val)
 		if has_ext:
 			attribs.text = '×'
 			attribs.fontSizeX = 12
@@ -354,7 +303,12 @@ def onInitRow(comp, row, attribs):
 
 def onInitCell(comp, row, col, attribs):
 	if row == 0:
-		attribs.text = HEADER_LABELS[col] if col < len(HEADER_LABELS) else ''
+		label = HEADER_LABELS[col] if col < len(HEADER_LABELS) else ''
+		# Show ↑ / ↓ next to the header label of the active sort column.
+		state = parent.Embody.fetch('sort_state', None, search=False)
+		if state and SORTABLE_COLUMNS.get(col) == state.get('col'):
+			label = f"{label} {'↑' if state.get('dir', 1) == 1 else '↓'}"
+		attribs.text = label
 		attribs.textJustify = JustifyType.CENTER
 		return
 	data = _source()
@@ -391,27 +345,7 @@ def onRollover(comp, row, col, coords, prevRow, prevCol, prevCoords):
 	if row is None or col is None or row <= 0 or row >= data.numRows or col < 0:
 		return
 
-	# Cell-specific rollover effects on Strategy column
-	if col == COL_STRATEGY:
-		st = data[row, 'strategy_state'].val
-		if st in ('TOX_Dirty', 'TDN_Dirty'):
-			comp.cellAttribs[row, col].text = '...'
-			comp.cellAttribs[row, col].bgColor = _t['dirty_roll']
-		elif st in ('TOX_ParChange', 'TDN_ParChange'):
-			comp.cellAttribs[row, col].text = '...'
-			comp.cellAttribs[row, col].bgColor = _t['par_change_roll']
-		elif st == 'TOX_Saved':
-			comp.cellAttribs[row, col].text = '...'
-			comp.cellAttribs[row, col].bgColor = _t['saved_roll']
-		elif st == 'TDN_Saved':
-			comp.cellAttribs[row, col].text = '...'
-			comp.cellAttribs[row, col].bgColor = _t['tdn_saved_roll']
-		elif st == 'Comp':
-			comp.cellAttribs[row, col].text = ''
-			comp.cellAttribs[row, col].bgColor = _t['comp_roll']
-		elif st == 'TDN_Exporting':
-			comp.cellAttribs[row, col].bgColor = _t['tdn_amber_roll']
-	elif col == COL_TYPE:
+	if col == COL_TYPE:
 		# Brighten to hint that clicking opens the network editor
 		comp.cellAttribs[row, col].bgColor = _brighten(_t['select'], 0.04)
 	elif col == COL_FILE:
@@ -419,23 +353,20 @@ def onRollover(comp, row, col, coords, prevRow, prevCol, prevCoords):
 		if data[row, 'rel_file_path'].val:
 			comp.cellAttribs[row, col].bgColor = _brighten(_t['select'], 0.04)
 	elif col == COL_DELETE:
-		has_ext = bool(data[row, 'rel_file_path'].val
-					   or data[row, 'strategy_state'].val.startswith('TOX')
-					   or data[row, 'strategy_state'].val.startswith('TDN'))
-		if has_ext:
+		if data[row, 'rel_file_path'].val:
 			comp.cellAttribs[row, col].textColor = _t['text']
 			comp.cellAttribs[row, col].bgColor = _t['select']
 
 	elif col == COL_SAVE:
-		st = data[row, 'strategy_state'].val
+		st = data[row, 'row_state'].val
 		if st in (DIRTY_STATES | SAVED_STATES):
 			# Brighten so the user sees the cell is actionable
 			comp.cellAttribs[row, col].textColor = _t['text']
 			comp.cellAttribs[row, col].bgColor = _t['select']
 
 	elif col == COL_RELOAD:
-		st = data[row, 'strategy_state'].val
-		if st in (DIRTY_STATES | {'TOX_Saved', 'TDN_Saved'}):
+		st = data[row, 'row_state'].val
+		if st in (DIRTY_STATES | SAVED_STATES):
 			comp.cellAttribs[row, col].textColor = _t['text']
 			comp.cellAttribs[row, col].bgColor = _t['select']
 
@@ -446,6 +377,29 @@ def onSelect(comp, startRow, startCol, startCoords,
 		return
 	if startRow != endRow or startCol != endCol:
 		return
+
+	# Header click toggles column sort: asc -> desc -> off, three-state.
+	if startRow == 0:
+		field = SORTABLE_COLUMNS.get(startCol)
+		if not field:
+			return
+		state = parent.Embody.fetch('sort_state', None, search=False)
+		if state and state.get('col') == field:
+			if state.get('dir', 1) == 1:
+				new_state = {'col': field, 'dir': -1}
+			else:
+				new_state = None  # third click clears sort
+		else:
+			new_state = {'col': field, 'dir': 1}
+		if new_state is None:
+			parent.Embody.unstore('sort_state')
+		else:
+			parent.Embody.store('sort_state', new_state)
+		# Recook the data source and reset the list to repaint.
+		parent.Embody.op('list/inject_parents').cook(force=True)
+		comp.par.reset.pulse()
+		return
+
 	if startRow <= 0:
 		return
 
@@ -512,22 +466,8 @@ def onSelect(comp, startRow, startCol, startCoords,
 		if rel_fp:
 			parent.Embody.OpenSaveFile(rel_fp)
 
-	elif col == COL_STRATEGY:
-		st = data[row, 'strategy_state'].val
-		oper = op(path)
-
-		if st == 'TDN_Exporting':
-			return
-		if oper is None:
-			# Synthetic parent row -- no op to act on
-			return
-		# Hand off to the Phase 2.5 contextual action menu, scoped to this
-		# row's op. The menu offers Save, Reload-from-.tdn (COMPs only),
-		# Reveal, Remove, etc. depending on op state.
-		parent.Embody.ext.Embody.OpenActionMenu(oper.path)
-
 	elif col == COL_SAVE:
-		st = data[row, 'strategy_state'].val
+		st = data[row, 'row_state'].val
 		oper = op(path)
 		if oper is None or st not in (DIRTY_STATES | SAVED_STATES):
 			return
@@ -539,34 +479,30 @@ def onSelect(comp, startRow, startCol, startCoords,
 			ext._saveOpFromMenu(oper)
 
 	elif col == COL_RELOAD:
-		st = data[row, 'strategy_state'].val
+		st = data[row, 'row_state'].val
 		oper = op(path)
 		if oper is None or oper.family != 'COMP':
 			return
-		if st not in (DIRTY_STATES | {'TOX_Saved', 'TDN_Saved'}):
+		if st not in (DIRTY_STATES | SAVED_STATES):
 			return
-		# Reload offers .tdn vs .tox; hand off to the Phase 2.5 sub-menu.
+		# Reload offers .tdn vs .tox; hand off to the sub-menu.
 		parent.Embody.ext.Embody._actionMenuReload(oper)
 
 	elif col == COL_DELETE:
 		rel_fp = data[row, 'rel_file_path'].val
-		st = data[row, 'strategy_state'].val
-		if not rel_fp and not st.startswith('TOX') and not st.startswith('TDN'):
+		if not rel_fp:
 			return
 		oper = op(path)
 		result = ui.messageBox(
 			'Remove',
 			'Remove this externalization?\n\n'
 			'This will delete the external file from disk, clear the\n'
-			"operator's externalization tags, and remove the tracking\n"
-			'entry. This cannot be undone.\n\n'
+			"operator's externalization parameter (par.externaltox or\n"
+			'par.file), and remove the tracking entry. Cannot be undone.\n\n'
 			'Operator: ' + path,
 			buttons=['Cancel', 'Remove'])
 		if result == 1:
-			if st.startswith('TDN'):
-				parent.Embody.RemoveTDNEntry(path)
-			else:
-				parent.Embody.RemoveListerRow(path, rel_fp)
+			parent.Embody.RemoveListerRow(path, rel_fp)
 
 
 def onRadio(comp, row, col, prevRow, prevCol):

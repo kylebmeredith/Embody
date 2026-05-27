@@ -1,4 +1,4 @@
-﻿"""
+"""
 TDN -- TouchDesigner Network open format (.tdn)
 
 Exports and imports TouchDesigner networks as human-readable JSON files.
@@ -1017,19 +1017,14 @@ class TDNExt:
 				self._log('No TDN exports to update', 'INFO')
 				return
 
+			# Every externalized COMP has a .tdn sidecar -- iterate all
+			# COMP rows.  DAT rows (.py / .json / .xml / etc.) have no .tdn.
 			tdn_entries = []
-			headers = [table[0, c].val for c in range(table.numCols)]
-			has_strategy = 'strategy' in headers
 			for i in range(1, table.numRows):
-				is_tdn = False
-				if has_strategy:
-					is_tdn = table[i, 'strategy'].val == 'tdn'
-				else:
-					is_tdn = table[i, 'type'].val == 'tdn'
-				if is_tdn:
-					root_path = table[i, 'path'].val
-					if op(root_path):
-						tdn_entries.append(root_path)
+				root_path = table[i, 'path'].val
+				target = op(root_path)
+				if target and target.family == 'COMP':
+					tdn_entries.append(root_path)
 
 			if not tdn_entries:
 				self._log('No TDN exports to update', 'INFO')
@@ -1164,25 +1159,6 @@ class TDNExt:
 				TDNExt._resolve_par_templates(op_defs, par_templates)
 			if type_defaults:
 				TDNExt._merge_type_defaults(op_defs, type_defaults)
-
-		# Pre-phase: Skip children of nested TDN-externalized COMPs.
-		# If a child COMP has its own .tdn entry in the externalizations table,
-		# its own file is the source of truth -- not the parent's snapshot.
-		tdn_paths = self._getTDNExternalizedPaths()
-		if tdn_paths:
-			tdn_paths.discard(target_path)  # We ARE importing this one
-			if tdn_paths:
-				skipped = self._stripNestedTDNChildren(
-					op_defs, target_path, tdn_paths)
-				for sp in skipped:
-					self._log(
-						f'Skipping children of {sp} -- has its own TDN '
-						f'externalization (source of truth)', 'INFO')
-
-		# Cross-validate tdn_ref pointers against table and disk
-		ref_warnings = self._validateTDNRefs(op_defs, target_path)
-		for w in ref_warnings:
-			self._log(w, 'WARNING')
 
 		try:
 			created = []
@@ -1516,7 +1492,19 @@ class TDNExt:
 			if child.name in skip:
 				continue
 
-			op_data = self._exportSingleOp(child, options, depth)
+			# Per-op fault isolation: one broken operator (e.g. a parameter
+			# clone with a stale source, an extension throwing on attribute
+			# access) must not abort the entire TDN.  Log the failure and
+			# move on -- the resulting .tdn will be missing this subtree
+			# but everything else is captured.
+			try:
+				op_data = self._exportSingleOp(child, options, depth)
+			except Exception as e:
+				self._log(
+					f'Skipped {child.path} ({type(e).__name__}: {e}) -- '
+					f'this operator and its children are not in the .tdn',
+					'WARNING')
+				continue
 			if op_data is not None:
 				# Skip bare auto-created defaults -- TD recreates these
 				# when the parent COMP is created, so they're noise
@@ -1655,12 +1643,6 @@ class TDNExt:
 						data['parameters'].pop(skip_par, None)
 					if not data['parameters']:
 						del data['parameters']
-			elif self._hasTDNTag(target) and not options.get('embed_all'):
-				# Child's network managed by its own .tdn file.
-				# Write a tdn_ref pointer for cross-validation.
-				tdn_ref = self._resolveTDNRef(target)
-				if tdn_ref:
-					data['tdn_ref'] = tdn_ref
 			else:
 				max_depth = options.get('max_depth')
 				if max_depth is None or depth < max_depth:
@@ -3560,28 +3542,21 @@ class TDNExt:
 			self._log(f'Cannot restore file links: {e}', 'WARNING')
 			return 0
 
-		# Build lookup: op_path -> rel_file_path for DATs under dest
+		# Build lookup: op_path -> rel_file_path for DATs under dest.
+		# Externalizations rows are one-per-op; skip rows that resolve to
+		# COMPs (their .tox is restored by TD natively) and only keep
+		# DAT entries -- those are the ones whose file links we need to
+		# re-attach after the reconstructed COMP comes up.
 		dest_prefix = dest.path.rstrip('/') + '/'
 		file_map = {}  # {op_path: rel_file_path}
-		headers = [table[0, c].val for c in range(table.numCols)]
-		has_strategy = 'strategy' in headers
 
 		for i in range(1, table.numRows):
 			row_path = table[i, 'path'].val
 			if not row_path.startswith(dest_prefix):
 				continue
-
-			# Skip COMP entries (TOX/TDN strategies)
-			row_type = table[i, 'type'].val
-			if has_strategy:
-				strategy = table[i, 'strategy'].val
-				if strategy in ('tox', 'tdn'):
-					continue
-			else:
-				if row_type in ('base', 'container', 'window',
-								'opviewer', 'replicator', 'tdn'):
-					continue
-
+			row_op = op(row_path)
+			if row_op is None or row_op.family != 'DAT':
+				continue
 			rel_path = table[i, 'rel_file_path'].val
 			if rel_path:
 				file_map[row_path] = rel_path
@@ -3628,13 +3603,10 @@ class TDNExt:
 				continue
 			paths.append(child.path)
 
-			# Recurse into COMPs (but skip palette clone children
-			# and TDN-tagged COMP children unless embed_all)
+			# Recurse into COMPs (but skip blackbox palette clone children)
 			if hasattr(child, 'children'):
 				if self._isPaletteClone(child) and (
 						self._resolvePaletteHandling(child) == 'blackbox'):
-					continue
-				if not embed_all and self._hasTDNTag(child):
 					continue
 				if max_depth is None or depth < max_depth:
 					paths.extend(
@@ -4065,132 +4037,6 @@ class TDNExt:
 			except Exception:
 				pass
 		return diffs
-
-	def _getTDNExternalizedPaths(self) -> set:
-		"""Return a set of all TDN-strategy COMP paths from the externalizations table."""
-		try:
-			table = self.ownerComp.ext.Embody.Externalizations
-			if not table or table.numRows < 2:
-				return set()
-			if table[0, 'strategy'] is None:
-				return set()
-		except Exception:
-			return set()
-		paths = set()
-		for i in range(1, table.numRows):
-			if table[i, 'strategy'].val == 'tdn':
-				paths.add(table[i, 'path'].val)
-		return paths
-
-	def _stripNestedTDNChildren(self, op_defs: list, parent_path: str,
-								tdn_paths: set) -> list:
-		"""Remove children from op_defs for COMPs with their own TDN entry.
-
-		The child COMP shell is still created (its operator definition remains),
-		but its children array is emptied -- the child's own .tdn file is the
-		source of truth for its internal network.
-
-		Args:
-			op_defs: List of operator definitions (mutated in place)
-			parent_path: TD path of the COMP being imported into
-			tdn_paths: Set of all TDN-strategy paths from externalizations table
-
-		Returns:
-			List of child paths that were skipped (for logging)
-		"""
-		skipped = []
-		for op_def in op_defs:
-			name = op_def.get('name')
-			if not name:
-				continue
-			child_path = f"{parent_path.rstrip('/')}/{name}"
-			children = op_def.get('children')
-			if children and child_path in tdn_paths:
-				op_def['children'] = []
-				skipped.append(child_path)
-			elif children:
-				skipped.extend(
-					self._stripNestedTDNChildren(children, child_path, tdn_paths))
-		return skipped
-
-	def _hasTDNTag(self, target):
-		"""Check if a COMP should be treated as a separate TDN reference.
-
-		Disabled for now: with the tag-system removed and Phase 2's
-		always-both .tox + .tdn writes, every par-set COMP technically
-		has its own .tdn sidecar -- but treating all of them as
-		references during a parent's TDN export breaks the export's
-		stale-file cleanup (it deletes the children's .tdn files).
-
-		Returning False means children are always embedded inline in the
-		parent's .tdn. A future phase can implement modular references
-		safely once cleanup is rewritten to protect every tracked .tdn.
-		"""
-		return False
-
-	def _resolveTDNRef(self, target) -> 'Optional[str]':
-		"""Look up an externalized child COMP's relative .tdn file path.
-
-		Returns the child's .tdn file path (relative to the project
-		externalization folder) from the externalizations table, or
-		None if the child isn't tracked.
-		"""
-		try:
-			table = self.ownerComp.ext.Embody.Externalizations
-			if not table or table.numRows < 2:
-				return None
-			for i in range(1, table.numRows):
-				if (table[i, 'path'].val == target.path
-						and table[i, 'strategy'].val == 'tdn'):
-					return table[i, 'rel_file_path'].val
-		except Exception:
-			pass
-		return None
-
-	def _validateTDNRefs(self, op_defs: list, parent_path: str) -> list:
-		"""Cross-validate tdn_ref pointers against the externalizations table.
-
-		Checks two independent sources of truth:
-		1. Each tdn_ref in the file corresponds to a table entry
-		2. Each referenced .tdn file exists on disk
-
-		Returns list of warning messages (empty = all valid).
-		"""
-		warnings = []
-		tdn_paths = self._getTDNExternalizedPaths()
-
-		for op_def in op_defs:
-			tdn_ref = op_def.get('tdn_ref')
-			name = op_def.get('name', '?')
-			child_path = f"{parent_path.rstrip('/')}/{name}"
-
-			if tdn_ref:
-				# Check 1: table entry exists for this child
-				if child_path not in tdn_paths:
-					warnings.append(
-						f'tdn_ref for {child_path} points to {tdn_ref} '
-						f'but no matching entry in externalizations table')
-
-				# Check 2: referenced file exists on disk
-				try:
-					abs_path = self.ownerComp.ext.Embody.buildAbsolutePath(
-						tdn_ref)
-					if not abs_path.is_file():
-						warnings.append(
-							f'tdn_ref for {child_path}: file not found: '
-							f'{tdn_ref}')
-				except Exception:
-					warnings.append(
-						f'tdn_ref for {child_path}: cannot resolve path: '
-						f'{tdn_ref}')
-
-			# Recurse into children
-			children = op_def.get('children', [])
-			if children:
-				warnings.extend(
-					self._validateTDNRefs(children, child_path))
-
-		return warnings
 
 	def _serializeValue(self, val):
 		"""Convert a parameter value to a JSON-safe type.
@@ -4627,29 +4473,20 @@ class TDNExt:
 			return 'unknown'
 
 	def _getBuildNumber(self, root_op):
-		"""Get build number from externalizations table, falling back to COMP par."""
-		# TSV is source of truth
+		"""Get build number from the externalizations row, falling back to par.Build."""
 		try:
 			table = self.ownerComp.ext.Embody.Externalizations
 			if table:
-				headers = [table[0, c].val for c in range(table.numCols)]
-				has_strategy = 'strategy' in headers
 				for i in range(1, table.numRows):
 					if table[i, 'path'].val != root_op.path:
 						continue
-					is_tdn = False
-					if has_strategy:
-						is_tdn = table[i, 'strategy'].val == 'tdn'
-					else:
-						is_tdn = table[i, 'type'].val == 'tdn'
-					if is_tdn:
-						try:
-							return int(table[i, 'build'].val)
-						except (ValueError, TypeError):
-							pass
+					try:
+						return int(table[i, 'build'].val)
+					except (ValueError, TypeError):
+						pass
+					break
 		except Exception:
 			pass
-		# Fall back to COMP parameter
 		if hasattr(root_op.par, 'Build'):
 			try:
 				return int(root_op.par.Build.eval())
@@ -4700,55 +4537,31 @@ class TDNExt:
 		return str(output_file)
 
 	def _trackTDNExport(self, root_path, file_path, build_num=None, touch_build=None):
-		"""Add/update a TDN entry in the externalizations table."""
+		"""Stamp build / timestamp metadata on the COMP's externalizations row.
+
+		The .tdn sidecar is implicit -- there is no separate TDN row to
+		create or track.  We just update the existing COMP row that
+		_scanAndPopulate already produced.  If the COMP isn't in the
+		table yet (export ran before Update), silently skip; the next
+		Update fills the row in.
+		"""
 		try:
 			table = self.ownerComp.ext.Embody.Externalizations
 			if not table:
 				return
-
-			from pathlib import Path
-			rel_path = self.ownerComp.ext.Embody.normalizePath(
-				str(Path(file_path).relative_to(project.folder)))
 			timestamp = datetime.now(timezone.utc).strftime(
 				'%Y-%m-%d %H:%M:%S UTC')
-
 			build_str = str(build_num) if build_num is not None else ''
 			tb_str = str(touch_build) if touch_build is not None else ''
-
-			# Check for strategy column (new schema)
-			headers = [table[0, c].val for c in range(table.numCols)]
-			has_strategy = 'strategy' in headers
-
-			# Update existing row if found -- check strategy='tdn' or type='tdn'
 			for i in range(1, table.numRows):
-				row_path = table[i, 'path'].val
-				if row_path != root_path:
+				if table[i, 'path'].val != root_path:
 					continue
-				is_tdn_row = False
-				if has_strategy and table[i, 'strategy'].val == 'tdn':
-					is_tdn_row = True
-				elif table[i, 'type'].val == 'tdn':
-					is_tdn_row = True
-				if is_tdn_row:
-					table[i, 'rel_file_path'] = rel_path
-					table[i, 'timestamp'] = timestamp
-					table[i, 'dirty'] = ''
-					table[i, 'build'] = build_str
-					table[i, 'touch_build'] = tb_str
-					return
-
-			# Add new row (schema-aware)
-			if has_strategy:
-				# Determine COMP type
-				target = op(root_path)
-				comp_type = target.type if target else 'base'
-				table.appendRow([root_path, comp_type, 'tdn', rel_path,
-								 timestamp, '', build_str, tb_str])
-			else:
-				table.appendRow([root_path, 'tdn', rel_path, timestamp,
-								 '', build_str, tb_str])
+				table[i, 'timestamp'] = timestamp
+				table[i, 'build'] = build_str
+				table[i, 'touch_build'] = tb_str
+				return
 		except Exception as e:
-			self._log(f'Failed to track TDN export: {e}', 'WARNING')
+			self._log(f'Failed to stamp TDN export metadata: {e}', 'WARNING')
 
 	def _warnLargeTDN(self, filepath: str, root_path: str) -> None:
 		"""Show a one-time warning when a TDN file exceeds the size threshold.
@@ -4808,23 +4621,6 @@ class TDNExt:
 			self._log(
 				f'Locked non-DAT operators in {root_op.path}: {summary} '
 				f'-- frozen data will not persist through TDN', 'WARNING')
-			try:
-				ui.messageBox(
-					'Embody -- Locked Content Warning',
-					f'{len(locked)} locked non-DAT operator(s) in '
-					f'{root_op.path}:\n\n{summary}\n\n'
-					f'TDN preserves the lock flag but cannot store '
-					f'frozen pixel, channel, or geometry data. '
-					f'After reload these operators will be locked '
-					f'but empty.\n\n'
-					f'To preserve locked content, either:\n'
-					f'  - Unlock the operator(s) (they will re-cook '
-					f'from inputs)\n'
-					f'  - Switch this COMP to TOX strategy instead '
-					f'of TDN',
-					buttons=['OK'])
-			except Exception:
-				pass  # Non-fatal if dialog fails
 		else:
 			# Import context -- log only, no dialog (reconstruction is automated)
 			self._log(

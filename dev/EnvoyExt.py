@@ -1,4 +1,4 @@
-﻿"""
+"""
 Envoy - MCP Server for TouchDesigner
 
 Enables AI coding assistants to interact with TouchDesigner via the Model Context Protocol.
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Optional, Any, Callable
 from queue import Queue, Empty
+import threading
 from threading import Lock, Event, Thread
 import json
 import subprocess
@@ -1119,8 +1120,7 @@ class EnvoyMCPServer:
             type_defaults, and par_templates compaction.
 
             Scope cost by passing a specific comp_path. Pass max_depth to
-            cap nesting if you're reading a large root. Works in all
-            Tdnmode values (Off / Export / Full) -- reads live state,
+            cap nesting if you're reading a large root. Reads live state,
             not the .tdn files on disk.
 
             When NOT to use: if you need evaluated-expression runtime
@@ -1503,16 +1503,68 @@ class EnvoyExt:
         self._RESTART_RESET_SECONDS: float = 120.0  # Reset counter after 2 min uptime
         self._venv_recreated: bool = False  # Guard: only auto-recreate venv once per session
 
-        # Shut down any server left over from a previous init cycle.
-        # Extensions get re-initialized when TD recompiles externalized code
-        # during project load, so __init__ can run multiple times.
-        # The Event is stored on sys because:
-        #   - .store() gets pickled on .toe save (Event has a Lock, not picklable)
-        #   - COMP attributes aren't supported on td.containerCOMP
-        #   - Module-level vars reset on recompile
-        #   - sys attributes persist across recompiles and are never pickled
+        # ADOPTION FAST PATH: when reinit fires (e.g. Customize Component
+        # adds/removes a param, or extension source DAT reloads), the old
+        # uvicorn server thread keeps running because it's a daemon thread
+        # owned by sys, not the extension instance. If it's still healthy
+        # on its bound port, ADOPT it instead of the default restart-cycle.
+        # Default cycle takes 10-17s (signal shutdown -> wait for socket
+        # release -> rebind -> restart). Adoption is sub-second.
         _registry = getattr(sys, '_envoy_shutdown_events', {})
         prev_event = _registry.get(self.ownerComp.path)
+        prev_server = getattr(sys, '_envoy_uvi_server', None)
+
+        adopt = False
+        try:
+            adopt = (
+                prev_server is not None
+                and not getattr(prev_server, 'should_exit', True)
+                and getattr(prev_server, 'started', False)
+                and bool(getattr(prev_server, 'servers', None))
+            )
+        except Exception:
+            adopt = False
+
+        if adopt:
+            # Reuse the existing shutdown event (DO NOT signal it)
+            self.shutdown_event = (
+                prev_event if isinstance(prev_event, Event) else Event())
+            _registry[self.ownerComp.path] = self.shutdown_event
+            sys._envoy_shutdown_events = _registry
+
+            # Find the live server thread by name. _runServer threads are
+            # named 'EnvoyServer-{port}-genN' (see Start's Thread() call).
+            for t in threading.enumerate():
+                if t.is_alive() and t.name.startswith('EnvoyServer-'):
+                    self._server_thread = t
+                    break
+            self._server_running = True
+            self.ownerComp.store('envoy_running', True)
+
+            # Probe the actual bound port for the status string
+            live_port = None
+            try:
+                for srv in prev_server.servers:
+                    for sock in getattr(srv, 'sockets', ()) or ():
+                        try:
+                            live_port = sock.getsockname()[1]
+                            break
+                        except Exception:
+                            pass
+                    if live_port is not None:
+                        break
+            except Exception:
+                pass
+            if live_port is not None:
+                self.ownerComp.par.Envoystatus = (
+                    f'Running on port {live_port}')
+            self._log(
+                f'Adopted existing Envoy server on port {live_port} '
+                f'(survived reinit, no restart)', 'INFO')
+            return  # Skip the rest of __init__ -- no Start() needed.
+
+        # FALLBACK: old server is gone, stale, or unhealthy -- run the
+        # original signal-and-restart cycle.
         if prev_event is not None and isinstance(prev_event, Event):
             prev_event.set()
 
@@ -1554,15 +1606,22 @@ class EnvoyExt:
     # === Server Lifecycle ===
 
     def onDestroyTD(self):
-        """Signal server shutdown when extension reinitializes.
+        """No-op: the daemon worker thread survives extension reinit.
 
-        TD calls this on the OLD instance before the new one initializes.
-        Only signals the shutdown event here -- actual Thread Manager cleanup
-        is deferred to _cleanupStaleThreads() in Start(), because modifying
-        system COMP state (thread.clean(), Runningthreads parameter) during
-        extension reinit can crash TD if triggered by a save-time file sync.
+        Earlier versions signaled shutdown_event here, but that defeated the
+        adoption fast-path in __init__: the new instance reused the SAME Event
+        object (so it could keep the running server's polling loop intact), and
+        then the old instance's destroy hook would fire shutdown_event.set() a
+        beat later -- killing the freshly-adopted server and forcing a full
+        10 s restart cycle (signal -> wait -> import mcp -> bind socket).
+
+        Lifecycle coverage without this signal:
+        - Extension reinit: server keeps running, new __init__ adopts.
+        - Explicit user disable: Stop() sets the event itself.
+        - TD exits: daemon=True kills the worker thread for free.
+        - COMP deletion (rare in dev): worker runs as zombie until TD exits.
         """
-        self.shutdown_event.set()
+        return
 
     def _cleanupStaleThreads(self) -> None:
         """Signal any stale Envoy server thread to exit cleanly.
@@ -1733,6 +1792,60 @@ class EnvoyExt:
             self._log(f'Server already active (status: {status})', 'WARNING')
             self.ownerComp.store('envoy_running', True)
             return
+
+        # FAST PATH: extension just reinitialized but our uvicorn server
+        # from the previous instance is still alive on sys._envoy_uvi_server.
+        # Killing it would burn 10-17 seconds (force-close socket → wait for
+        # OS to release the port → start over). Instead, adopt it: rebuild
+        # the per-instance bookkeeping and skip the full start cycle.
+        # Only adopt if it's truly healthy AND on our preferred port.
+        old_server = getattr(sys, '_envoy_uvi_server', None)
+        if (old_server is not None
+                and not getattr(old_server, 'should_exit', True)
+                and getattr(old_server, 'servers', None)):
+            try:
+                # Verify the server has a live listener socket on our port
+                base_port = self.ownerComp.par.Envoyport.eval()
+                live_port = None
+                for srv in old_server.servers:
+                    for sock in getattr(srv, 'sockets', ()) or ():
+                        try:
+                            live_port = sock.getsockname()[1]
+                            break
+                        except Exception:
+                            pass
+                    if live_port is not None:
+                        break
+                if live_port is not None:
+                    self._log(
+                        f'Adopting existing Envoy server on port {live_port} '
+                        f'(survived reinit, no restart)', 'INFO')
+                    self.ownerComp.store('envoy_running', True)
+                    self.ownerComp.par.Envoystatus = f'Running on port {live_port}'
+                    # Re-link the shutdown event in the global registry so
+                    # _onRefresh and pump callbacks can find it from this
+                    # new instance.
+                    _registry = getattr(sys, '_envoy_shutdown_events', {})
+                    if self.ownerComp.path in _registry:
+                        self.shutdown_event = _registry[self.ownerComp.path]
+                    else:
+                        # No prior shutdown event -- create one and register it.
+                        self.shutdown_event = Event()
+                        _registry[self.ownerComp.path] = self.shutdown_event
+                        sys._envoy_shutdown_events = _registry
+                    # Find the existing server thread by name (daemons survive
+                    # reinit and keep running). Used by _onRefresh's liveness
+                    # check.
+                    for t in threading.enumerate():
+                        if t.name == '_runServer' and t.is_alive():
+                            self._server_thread = t
+                            break
+                    self._server_running = True
+                    return
+            except Exception as e:
+                self._log(
+                    f'Adoption check failed ({e}), falling back to full '
+                    f'restart', 'DEBUG')
 
         # Resolve git root silently -- Start() never prompts. Dialogs belong only
         # in _enableEnvoy() / InitGit() which are explicitly user-initiated.
@@ -2249,12 +2362,9 @@ class EnvoyExt:
             self._signalTestError(pending, 'Test framework extension not ready')
             return None
         try:
-            # Suppress Embody's Update/Refresh cycle during tests to
-            # prevent extension reinit from TDN re-exports triggered by
-            # test-created operators making COMPs structurally dirty.
-            embody = op.Embody
-            self._test_saved_status = embody.par.Status.eval()
-            embody.par.Status = 'Testing'
+            # par.Status was removed in the cleanup pass -- the test-run
+            # suppression knob is no longer needed (Update only blocks
+            # on Performmode now). Test runner just kicks off directly.
             test_comp.RunTestsDeferredPerTest(
                 suite_name=suite_name, test_name=test_name)
             self._schedulePollTestCompletion()
@@ -2265,11 +2375,8 @@ class EnvoyExt:
             return None
 
     def _restoreStatusAfterTests(self):
-        """Re-enable Embody's Update cycle after tests complete."""
-        saved = getattr(self, '_test_saved_status', None)
-        if saved is not None:
-            op.Embody.par.Status = saved
-            self._test_saved_status = None
+        """No-op: kept for callers; par.Status removed in cleanup pass."""
+        return
 
     def _signalTestError(self, pending, message):
         """Signal an error to the waiting worker thread via the test Event."""
@@ -4020,11 +4127,7 @@ class EnvoyExt:
 
         try:
             if target.family == 'COMP':
-                strategy = op.Embody.ext.Embody._getCompStrategy(target)
-                if strategy == 'tdn':
-                    op.Embody.SaveTDN(op_path)
-                else:
-                    op.Embody.Save(op_path)
+                op.Embody.Save(op_path)
             elif target.family == 'DAT':
                 if hasattr(target.par, 'syncfile') and target.par.syncfile.eval():
                     return {
