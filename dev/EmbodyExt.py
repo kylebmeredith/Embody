@@ -69,9 +69,9 @@ class EmbodyExt:
         # Auto-deploy release tox to consumer projects
         'Releasetargets',
         # Node coloring for externalized ops
-        'Tintexternalized',
-        'Comptintcolorr', 'Comptintcolorg', 'Comptintcolorb',
-        'Dattintcolorr', 'Dattintcolorg', 'Dattintcolorb',
+        'Colorexternalized',
+        'Compcolorr', 'Compcolorg', 'Compcolorb',
+        'Datcolorr', 'Datcolorg', 'Datcolorb',
         # Externalization defaults applied on _setupCompForExternalization
         'Reloadcustom', 'Reloadbuiltin', 'Savebackup',
     })
@@ -1720,15 +1720,23 @@ class EmbodyExt:
         # Detect dirty COMPs (par or structural change since last snapshot).
         # MARK them dirty in the table. NO SAVES -- saving is an explicit
         # action (Save row button or SaveAllDirty). Sync is detection-only.
+        # Per-COMP try/except: one operator with a broken expression (e.g.
+        # a stale op() reference inside a parameter) must not abort the
+        # dirty-detection loop for every COMP after it.
+        # Precompute the externalized-COMP boundary once so each
+        # _isTDNDirty call doesn't redo the full-tree walk.
+        boundary = self._getExternalizedCompPaths()
         for comp in self.getExternalizedOps(COMP):
-            par_dirty = self.param_tracker.compareParameters(comp)
-            struct_dirty = self._isTDNDirty(comp)
-            if par_dirty or struct_dirty:
-                try:
+            try:
+                par_dirty = self.param_tracker.compareParameters(comp)
+                struct_dirty = self._isTDNDirty(comp, boundary)
+                if par_dirty or struct_dirty:
                     self.Externalizations[comp.path, 'dirty'] = (
                         'Par' if par_dirty else 'True')
-                except Exception:
-                    pass
+            except Exception as e:
+                self.Log(
+                    f'Skipped dirty-check for {comp.path} '
+                    f'({type(e).__name__}: {e})', 'WARNING')
 
         # Get operator lists -- discovery is par-driven now.
         # An op is "to be externalized" iff its native parameter says so:
@@ -1840,24 +1848,30 @@ class EmbodyExt:
         Excludes clones, replicants, /local, and engine/time/annotate types via
         isOpProcessable.
         """
+        # Fault-tolerant key callback: a single broken op (e.g. a COMP
+        # whose parameter expression raises during evaluation) must not
+        # poison the entire scan.  Return False on any exception so the
+        # op is silently skipped; the scan continues to the next one.
+        def _safe_comp_key(x):
+            try:
+                return (x.par.externaltox.eval() != ''
+                        and self.isOpProcessable(x))
+            except Exception:
+                return False
+
+        def _safe_dat_key(x):
+            try:
+                return (x.par.file.eval() != ''
+                        and x.type in self.supported_dat_types
+                        and self.isOpProcessable(x))
+            except Exception:
+                return False
+
         if opFamily == COMP:
-            return self.root.findChildren(
-                type=COMP,
-                key=lambda x: (
-                    x.par.externaltox.eval() != '' and
-                    self.isOpProcessable(x)
-                )
-            )
+            return self.root.findChildren(type=COMP, key=_safe_comp_key)
         else:
             return self.root.findChildren(
-                type=DAT,
-                parName='file',
-                key=lambda x: (
-                    x.par.file.eval() != '' and
-                    x.type in self.supported_dat_types and
-                    self.isOpProcessable(x)
-                )
-            )
+                type=DAT, parName='file', key=_safe_dat_key)
 
     def isOpEligibleToBeExternalized(self, oper: OP) -> bool:
         """Check if an operator can be externalized.
@@ -2331,7 +2345,27 @@ class EmbodyExt:
             self.Log('ReleaseProject: cancelled by user', 'INFO')
             return
         save_path = str(Path(chosen) / project.name)
-        self.ReleaseProject(save_path=save_path)
+        # Wrap the work so an unexpected exception above ReleaseProject's
+        # own try/except still produces a popup, not a silent textport drop.
+        try:
+            result = self.ReleaseProject(save_path=save_path)
+        except Exception as e:
+            result = {'error': f'{type(e).__name__}: {e}'}
+        if isinstance(result, dict) and result.get('error'):
+            self._messageBox(
+                'Embody -- Release Project Failed',
+                f'Could not release project:\n\n{result["error"]}\n\n'
+                f'Live session is restored.  See textport for details.',
+                buttons=['OK'])
+        elif isinstance(result, dict) and result.get('success'):
+            self._messageBox(
+                'Embody -- Release Project Complete',
+                f'Released project to:\n{result.get("path", save_path)}\n\n'
+                f'Stripped {result.get("stripped_count", "?")} '
+                f'externalization(s).\n\n'
+                f'Working path is now the release path -- use File > Open '
+                f'to return to your original .toe.',
+                buttons=['OK'])
 
     def ReleaseProject(self, save_path: Optional[str] = None) -> dict[str, Any]:
         """Save a self-contained, unexternalized copy of the entire project.
@@ -2476,38 +2510,50 @@ class EmbodyExt:
             # Skip annotations -- they're fingerprinted separately below
             if c.type == 'annotate':
                 continue
-            color = tuple(round(v, 4) for v in c.color)
-            tags = tuple(sorted(c.tags))
-            flags = (c.bypass, c.lock, c.display, c.render,
-                     c.viewer, c.current, c.expose)
-            parts.append((
-                c.name, c.type,
-                c.nodeX, c.nodeY, c.nodeWidth, c.nodeHeight,
-                color, tags, flags, c.comment,
-            ))
-            for i, conn in enumerate(c.inputConnectors):
-                for link in conn.connections:
-                    parts.append((c.name, 'in', i, link.owner.name))
-            # Recurse into child COMPs that don't have their own TDN file
-            if c.isCOMP and (tdn_paths is None or c.path not in tdn_paths):
-                child_fp = EmbodyExt._computeTDNFingerprint(c, tdn_paths)
-                parts.append((c.name, 'children', child_fp))
+            # Per-child try/except: if an operator's properties throw
+            # (e.g. a broken parameter expression read while accessing
+            # color or tags), record a sentinel and keep walking.  The
+            # sentinel changes if the error message changes, so subsequent
+            # edits still register as a dirty diff.
+            try:
+                color = tuple(round(v, 4) for v in c.color)
+                tags = tuple(sorted(c.tags))
+                flags = (c.bypass, c.lock, c.display, c.render,
+                         c.viewer, c.current, c.expose)
+                parts.append((
+                    c.name, c.type,
+                    c.nodeX, c.nodeY, c.nodeWidth, c.nodeHeight,
+                    color, tags, flags, c.comment,
+                ))
+                for i, conn in enumerate(c.inputConnectors):
+                    for link in conn.connections:
+                        parts.append((c.name, 'in', i, link.owner.name))
+                # Recurse into child COMPs that don't have their own TDN file
+                if c.isCOMP and (tdn_paths is None or c.path not in tdn_paths):
+                    child_fp = EmbodyExt._computeTDNFingerprint(c, tdn_paths)
+                    parts.append((c.name, 'children', child_fp))
+            except Exception as e:
+                parts.append((c.name, 'error', type(e).__name__, str(e)))
         # All annotations (utility=True or False) -- uses annotation-specific attrs
         for ann in sorted(comp.findChildren(type=annotateCOMP, depth=1,
                                             includeUtility=True),
                           key=lambda a: a.name):
-            ann_color = tuple(round(v, 4) for v in (
-                ann.par.Backcolorr.eval(), ann.par.Backcolorg.eval(),
-                ann.par.Backcolorb.eval()))
-            parts.append((
-                ann.name, 'annotation',
-                ann.par.Mode.eval(),
-                ann.par.Titletext.eval(),
-                ann.par.Bodytext.eval(),
-                ann.nodeX, ann.nodeY, ann.nodeWidth, ann.nodeHeight,
-                ann_color,
-                round(ann.par.Opacity.eval(), 4),
-            ))
+            try:
+                ann_color = tuple(round(v, 4) for v in (
+                    ann.par.Backcolorr.eval(), ann.par.Backcolorg.eval(),
+                    ann.par.Backcolorb.eval()))
+                parts.append((
+                    ann.name, 'annotation',
+                    ann.par.Mode.eval(),
+                    ann.par.Titletext.eval(),
+                    ann.par.Bodytext.eval(),
+                    ann.nodeX, ann.nodeY, ann.nodeWidth, ann.nodeHeight,
+                    ann_color,
+                    round(ann.par.Opacity.eval(), 4),
+                ))
+            except Exception as e:
+                parts.append((ann.name, 'annotation_error',
+                              type(e).__name__, str(e)))
         return tuple(parts)
 
     def _getExternalizedCompPaths(self) -> set:
@@ -2519,13 +2565,21 @@ class EmbodyExt:
         """
         return {c.path for c in self.getOpsByPar(COMP)}
 
-    def _isTDNDirty(self, comp) -> bool:
-        """Check if a COMP's network has changed since last save."""
-        boundary = self._getExternalizedCompPaths()
+    def _isTDNDirty(self, comp, boundary=None) -> bool:
+        """Check if a COMP's network has changed since last save.
+
+        boundary -- optional pre-computed set of externalized COMP paths.
+        Callers in a loop should compute it once and pass it in;
+        _getExternalizedCompPaths walks the whole project tree, and
+        recomputing it per COMP was the dominant cost in dirtyHandler
+        on large projects (9 COMPs * full-tree walk = ~3 s lag on
+        Refresh).
+        """
+        if boundary is None:
+            boundary = self._getExternalizedCompPaths()
         current = self._computeTDNFingerprint(comp, boundary)
         stored = self._tdn_fingerprints.get(comp.path)
         if stored is None:
-            # No stored fingerprint -- assume clean (just initialized)
             self._tdn_fingerprints[comp.path] = current
             return False
         return current != stored
@@ -2604,11 +2658,19 @@ class EmbodyExt:
         paths flagged dirty.
         """
         dirties = []
+        # Compute the externalized-COMP boundary set once and pass it
+        # to every _isTDNDirty call.  Without this, each call walks the
+        # entire project tree to rebuild the same set -- O(N) COMPs *
+        # O(N) tree walks = O(N^2), and we were seeing ~3 s Refresh lag
+        # on Lightpath-scale projects.
+        boundary = self._getExternalizedCompPaths()
         for oper in self.getExternalizedOps(COMP):
-            par_dirty = self.param_tracker.compareParameters(oper)
-            struct_dirty = self._isTDNDirty(oper)
-            dirty = par_dirty or struct_dirty
+            # Per-COMP try/except: a broken expression on one operator
+            # must not abort dirty-detection for the rest of the project.
             try:
+                par_dirty = self.param_tracker.compareParameters(oper)
+                struct_dirty = self._isTDNDirty(oper, boundary)
+                dirty = par_dirty or struct_dirty
                 if dirty:
                     self.Externalizations[oper.path, 'dirty'] = (
                         'Par' if par_dirty else 'True')
@@ -2618,28 +2680,42 @@ class EmbodyExt:
                     if str(self.Externalizations[oper.path, 'dirty'].val) != 'Par':
                         self.Externalizations[oper.path, 'dirty'] = False
             except Exception as e:
-                self.Log(f"Failed to update dirty state for {oper.path}: {e}", "DEBUG")
+                self.Log(
+                    f'Skipped dirty-check for {oper.path} '
+                    f'({type(e).__name__}: {e})', 'DEBUG')
         return dirties
 
     def updateDirtyStates(self, externalizationsFolder: str) -> None:
-        """Update dirty states and check for path/parameter changes."""
-        dirties = self.dirtyHandler(False)
-        param_changes = []
+        """Update dirty states and check for path drift.
 
+        dirtyHandler() already iterates every externalized COMP and
+        runs the full compareParameters + _isTDNDirty pass -- and
+        flags ParChange rows on its own.  This second pass is purely
+        about catching rel_file_path drift (the path on the operator
+        no longer matches the value the table is showing).  Running
+        compareParameters again here doubled Refresh() time on large
+        projects for no benefit.
+        """
+        dirties = self.dirtyHandler(False)
+        # Read ParChange flags dirtyHandler already wrote so the log
+        # summary below stays accurate without recomputing them.
+        param_changes = [
+            self.Externalizations[i, 'path'].val
+            for i in range(1, self.Externalizations.numRows)
+            if self.Externalizations[i, 'dirty'].val == 'Par'
+        ]
         for oper in self.getExternalizedOps(COMP) + self.getExternalizedOps(DAT):
-            current_path = self.getExternalPath(oper)
             try:
-                table_path = self.normalizePath(self.Externalizations[oper.path, 'rel_file_path'].val)
+                current_path = self.getExternalPath(oper)
+                table_path = self.normalizePath(
+                    self.Externalizations[oper.path, 'rel_file_path'].val)
                 if current_path != table_path:
                     self.Externalizations[oper.path, 'rel_file_path'] = current_path
                     self.Log(f"Updated path for {oper.path}", "SUCCESS")
             except Exception as e:
-                self.Log(f"Failed to update path for {oper.path}: {e}", "WARNING")
-                pass
-            
-            if oper.family == 'COMP' and self.param_tracker.compareParameters(oper):
-                param_changes.append(oper.path)
-                self.Externalizations[oper.path, 'dirty'] = 'Par'
+                self.Log(
+                    f'Skipped path-update for {oper.path} '
+                    f'({type(e).__name__}: {e})', 'WARNING')
 
         if dirties or param_changes:
             msgs = []
@@ -2677,7 +2753,7 @@ class EmbodyExt:
             self._setupDatForExternalization(oper, rel_file_path, save_file_path)
 
         # Tint the node by family so externalizations are visually obvious.
-        # Cyan for COMPs (TOX), magenta for DATs. Controlled by Tintexternalized.
+        # Cyan for COMPs (TOX), magenta for DATs. Controlled by Colorexternalized.
         self._applyExternalizedColor(oper)
 
         self.Log(f"Added '{oper.path}'", "SUCCESS")
@@ -2685,18 +2761,18 @@ class EmbodyExt:
     def _applyExternalizedColor(self, oper: 'OP') -> None:
         """Tint a node by family (cyan for COMPs, magenta for DATs).
 
-        Reads the Comptintcolor / Dattintcolor RGB groups on the Embody
-        COMP. No-op when the Tintexternalized toggle is off, or when
+        Reads the Compcolor / Datcolor RGB groups on the Embody
+        COMP. No-op when the Colorexternalized toggle is off, or when
         the colors haven't been configured yet (graceful fallback for
         older releases that didn't ship these params).
         """
-        toggle = getattr(self.my.par, 'Tintexternalized', None)
+        toggle = getattr(self.my.par, 'Colorexternalized', None)
         if toggle is not None and not toggle.eval():
             return
         if oper.family == 'COMP':
-            prefix = 'Comptintcolor'
+            prefix = 'Compcolor'
         elif oper.family == 'DAT':
-            prefix = 'Dattintcolor'
+            prefix = 'Datcolor'
         else:
             return
         try:
@@ -2713,7 +2789,7 @@ class EmbodyExt:
     def RecolorAllExternalized(self) -> dict:
         """Apply the configured tint colors to every par-driven externalization.
 
-        Useful when you change Comptintcolor / Dattintcolor and want
+        Useful when you change Compcolor / Datcolor and want
         existing nodes to pick up the new values, or after dropping a
         fresh Embody into a project that had its operators pre-existing.
         """
@@ -3004,16 +3080,25 @@ class EmbodyExt:
         table.clear(keepFirstRow=True)
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         for oper in self.getOpsByPar(COMP) + self.getOpsByPar(DAT):
-            if oper.family == 'COMP':
-                rel = oper.par.externaltox.eval()
-                dirty = bool(oper.dirty)
-            else:
-                rel = oper.par.file.eval()
-                dirty = ''
-            self._addToTable(
-                oper, rel, timestamp, dirty,
-                build_num='', touch_build='',
-            )
+            # Per-op fault isolation: a single broken op (e.g. an
+            # invalidated parameter expression that throws on .eval()) must
+            # not abort the rest of the scan.  Skip it and continue; the
+            # table will simply be missing that one row.
+            try:
+                if oper.family == 'COMP':
+                    rel = oper.par.externaltox.eval()
+                    dirty = bool(oper.dirty)
+                else:
+                    rel = oper.par.file.eval()
+                    dirty = ''
+                self._addToTable(
+                    oper, rel, timestamp, dirty,
+                    build_num='', touch_build='',
+                )
+            except Exception as e:
+                self.Log(
+                    f'Skipped {oper.path} in scan ({type(e).__name__}: {e})',
+                    'WARNING')
 
     def handleSubtraction(self, oper: OP) -> None:
         """Process removal of an operator from externalization.
@@ -3084,6 +3169,13 @@ class EmbodyExt:
 
         folder = self.ExternalizationsFolder or ''
 
+        # Track successes and per-op failures so the final popup can
+        # tell the user what actually happened.  Without this the user
+        # only sees the textport log and has no idea if the run worked.
+        n_dat_ok = 0
+        n_comp_ok = 0
+        errors: list[tuple[str, str]] = []
+
         # Process DATs -- assign par.file based on type's default extension
         for oper in self.root.findChildren(type=DAT, parName='file'):
             if self._shouldSkipOp(oper, paths_to_exclude):
@@ -3096,8 +3188,10 @@ class EmbodyExt:
             try:
                 oper.par.file.readOnly = False
                 oper.par.file = f"{folder}/{oper.name}.{ext}" if folder else f"{oper.name}.{ext}"
+                n_dat_ok += 1
             except Exception as e:
                 self.Log(f'Failed to set par.file on {oper.path}: {e}', 'WARNING')
+                errors.append((oper.path, f'{type(e).__name__}: {e}'))
 
         # Process COMPs -- assign par.externaltox so Update picks them up
         for oper in self.root.findChildren(type=COMP, parName='externaltox'):
@@ -3108,15 +3202,39 @@ class EmbodyExt:
             try:
                 oper.par.externaltox.readOnly = False
                 oper.par.externaltox = f"{folder}/{oper.name}.tox" if folder else f"{oper.name}.tox"
+                n_comp_ok += 1
             except Exception as e:
                 self.Log(f'Failed to set par.externaltox on {oper.path}: {e}', 'WARNING')
+                errors.append((oper.path, f'{type(e).__name__}: {e}'))
 
-        self.UpdateHandler()
+        try:
+            self.UpdateHandler()
+        except Exception as e:
+            self.Log(f'ExternalizeProject: UpdateHandler failed: {e}', 'ERROR')
+            errors.append(('<UpdateHandler>', f'{type(e).__name__}: {e}'))
 
         # Export project-wide TDN snapshot if requested
         if export_project_tdn:
-            self.my.ext.TDN.ExportNetworkAsync(
-                output_file='auto', embed_all=True)
+            try:
+                self.my.ext.TDN.ExportNetworkAsync(
+                    output_file='auto', embed_all=True)
+            except Exception as e:
+                self.Log(f'ExternalizeProject: TDN export failed: {e}', 'ERROR')
+                errors.append(('<ExportNetworkAsync>',
+                              f'{type(e).__name__}: {e}'))
+
+        # Final summary popup. Always shown so the user gets confirmation
+        # of what was processed; lists the first 10 failures inline.
+        summary = (
+            f'Externalized {n_comp_ok} COMP(s) and {n_dat_ok} DAT(s).')
+        if errors:
+            top = '\n'.join(f'  • {p}: {msg}' for p, msg in errors[:10])
+            more = ('' if len(errors) <= 10
+                    else f'\n  ... and {len(errors) - 10} more (see textport)')
+            summary += (
+                f'\n\nSkipped {len(errors)} item(s) due to errors:\n{top}{more}')
+        self._messageBox('Embody -- Externalize Project',
+                         summary, buttons=['OK'])
 
     def _shouldSkipOp(self, oper, paths_to_exclude):
         """Check if operator should be skipped in project externalization."""
@@ -3731,8 +3849,25 @@ class EmbodyExt:
         if not chosen:
             return
         save_path = f'{chosen}/{new_name}_{new_version}.tox'
-        self.Release(target, name=new_name, version=new_version,
-                     save_path=save_path)
+        # Catch exceptions Release didn't already convert into the
+        # {'error': ...} return dict (e.g. unexpected bugs above the
+        # try/except boundary).  Either way, surface to the user.
+        try:
+            result = self.Release(target, name=new_name, version=new_version,
+                                  save_path=save_path)
+        except Exception as e:
+            result = {'error': f'{type(e).__name__}: {e}'}
+        if isinstance(result, dict) and result.get('error'):
+            self._messageBox(
+                'Embody -- Release Failed',
+                f'Could not release {target.path}:\n\n{result["error"]}\n\n'
+                f'See textport for full traceback.',
+                buttons=['OK'])
+        else:
+            self._messageBox(
+                'Embody -- Release Complete',
+                f'Released {target.path} to:\n{save_path}',
+                buttons=['OK'])
 
     def _actionMenuNotExternalized(self, target: OP) -> None:
         """Async menu for an op that is not yet externalized."""
@@ -4247,18 +4382,37 @@ class ParameterTracker:
         self.param_store = {}
         
     def captureParameters(self, comp):
-        """Capture all parameters of a COMP."""
+        """Capture all parameters of a COMP.
+
+        Reads each parameter inside its own try/except: a broken
+        expression on one parameter (e.g. a stale op() reference)
+        must not abort the entire capture and leave the COMP's
+        dirty-state un-checkable.  The broken parameter is recorded
+        as a sentinel so a later edit on it still flips the COMP to
+        dirty, and the rest of the parameters are captured cleanly.
+        """
         params = {}
         for page in comp.pages + comp.customPages:
             for par in page.pars:
                 if par.name in ['externaltox', 'file']:
                     continue
-                params[par.name] = {
-                    'value': par.eval(),
-                    'expr': par.expr if par.expr else None,
-                    'bindExpr': par.bindExpr if par.bindExpr else None,
-                    'mode': par.mode
-                }
+                try:
+                    params[par.name] = {
+                        'value': par.eval(),
+                        'expr': par.expr if par.expr else None,
+                        'bindExpr': par.bindExpr if par.bindExpr else None,
+                        'mode': par.mode
+                    }
+                except Exception as e:
+                    # Sentinel marks the param as "unreadable but present";
+                    # the str(e) lets compareParameters detect a change if
+                    # the error message itself shifts.
+                    params[par.name] = {
+                        'value': f'<unreadable: {type(e).__name__}>',
+                        'expr': None,
+                        'bindExpr': None,
+                        'mode': None,
+                    }
         return params
     
     def updateParamStore(self, comp):
