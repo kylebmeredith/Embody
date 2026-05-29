@@ -121,17 +121,25 @@ def onCook(scriptOp):
 				continue
 			matched_paths.add(path)
 
-		# Include ancestor paths to maintain tree structure
-		paths_to_keep = set()
-		for path in matched_paths:
-			paths_to_keep.add(path)
-			parts = path.strip('/').split('/')
-			for j in range(1, len(parts)):
-				ancestor = '/' + '/'.join(parts[:j])
-				if ancestor in all_paths:
-					paths_to_keep.add(ancestor)
-
-		all_paths = paths_to_keep
+		# Tree mode: include ancestor paths so hierarchy stays readable
+		# (a dirty leaf without its parent chain shown is disorienting).
+		# Flat (list) mode: skip ancestor injection -- the user explicitly
+		# opted out of hierarchy, so the filter should be strict.  Without
+		# this, filtering by dirty in flat mode shows clean COMPs that
+		# merely happen to be ancestors of a dirty descendant, which looks
+		# like a bug ("why is this clean COMP in my dirty list?").
+		if flat_mode:
+			all_paths = matched_paths
+		else:
+			paths_to_keep = set()
+			for path in matched_paths:
+				paths_to_keep.add(path)
+				parts = path.strip('/').split('/')
+				for j in range(1, len(parts)):
+					ancestor = '/' + '/'.join(parts[:j])
+					if ancestor in all_paths:
+						paths_to_keep.add(ancestor)
+			all_paths = paths_to_keep
 		if not all_paths:
 			return
 
